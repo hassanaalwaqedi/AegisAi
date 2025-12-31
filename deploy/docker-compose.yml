@@ -1,0 +1,119 @@
+# AegisAI Production Deployment
+# Docker Compose with nginx HTTPS termination
+
+version: "3.8"
+
+services:
+  # ===========================================
+  # nginx Reverse Proxy (HTTPS termination)
+  # ===========================================
+  nginx:
+    image: nginx:alpine
+    container_name: aegis-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - aegisai
+    restart: unless-stopped
+    networks:
+      - aegis-network
+    healthcheck:
+      test: [ "CMD", "nginx", "-t" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================
+  # AegisAI Backend (API + Processing)
+  # ===========================================
+  aegisai:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: aegis-backend
+    environment:
+      - AEGIS_API_HOST=0.0.0.0
+      - AEGIS_API_PORT=8080
+      - AEGIS_API_KEY=${AEGIS_API_KEY:-change-me-in-production}
+      - AEGIS_DEBUG=false
+      - DATABASE_URL=sqlite:///app/data/aegis.db
+    volumes:
+      - aegis-data:/app/data
+      - aegis-models:/app/models
+    expose:
+      - "8080"
+    restart: unless-stopped
+    networks:
+      - aegis-network
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/status" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+  # ===========================================
+  # PostgreSQL (optional - for production scale)
+  # ===========================================
+  # Uncomment for PostgreSQL instead of SQLite
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: aegis-postgres
+  #   environment:
+  #     - POSTGRES_USER=${POSTGRES_USER:-aegis}
+  #     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-aegis_secret}
+  #     - POSTGRES_DB=${POSTGRES_DB:-aegisai}
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   expose:
+  #     - "5432"
+  #   restart: unless-stopped
+  #   networks:
+  #     - aegis-network
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U aegis"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+  # ===========================================
+  # Redis (optional - for caching)
+  # ===========================================
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: aegis-redis
+  #   volumes:
+  #     - redis-data:/data
+  #   expose:
+  #     - "6379"
+  #   restart: unless-stopped
+  #   networks:
+  #     - aegis-network
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+  # ===========================================
+  # Volumes
+  # ===========================================
+volumes:
+  aegis-data:
+    driver: local
+  aegis-models:
+    driver: local
+  # postgres-data:
+  #   driver: local
+  # redis-data:
+  #   driver: local
+
+  # ===========================================
+  # Networks
+  # ===========================================
+networks:
+  aegis-network:
+    driver: bridge

@@ -1,0 +1,145 @@
+# AegisAI .gitignore
+
+# ═══════════════════════════════════════════════════════════
+# SECRETS & SENSITIVE FILES (CRITICAL)
+# ═══════════════════════════════════════════════════════════
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+*.key
+*.pem
+*.crt
+secrets/
+credentials/
+
+# ═══════════════════════════════════════════════════════════
+# PYTHON
+# ═══════════════════════════════════════════════════════════
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+env/
+.conda/
+
+# ═══════════════════════════════════════════════════════════
+# TESTING
+# ═══════════════════════════════════════════════════════════
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# ═══════════════════════════════════════════════════════════
+# IDE & EDITORS
+# ═══════════════════════════════════════════════════════════
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ═══════════════════════════════════════════════════════════
+# OS FILES
+# ═══════════════════════════════════════════════════════════
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ═══════════════════════════════════════════════════════════
+# LARGE DATA FILES
+# ═══════════════════════════════════════════════════════════
+# Video files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.flv
+*.webm
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+*.weights
+*.h5
+*.pb
+models/*.pt
+models/*.pth
+
+# Data directories (keep structure, ignore contents)
+data/input/*
+data/output/*
+!data/input/.gitkeep
+!data/output/.gitkeep
+
+# ═══════════════════════════════════════════════════════════
+# LOGS & TEMPORARY FILES
+# ═══════════════════════════════════════════════════════════
+*.log
+logs/
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Alert logs (may contain sensitive incident data)
+data/output/alerts.log
+
+# ═══════════════════════════════════════════════════════════
+# DOCKER
+# ═══════════════════════════════════════════════════════════
+docker-compose.override.yml
+
+# ═══════════════════════════════════════════════════════════
+# JUPYTER NOTEBOOKS
+# ═══════════════════════════════════════════════════════════
+.ipynb_checkpoints/
+*.ipynb
+
+# ═══════════════════════════════════════════════════════════
+# MISCELLANEOUS
+# ═══════════════════════════════════════════════════════════
+*.pid
+*.seed
+*.pid.lock
+.cache/
