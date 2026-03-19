@@ -1,13 +1,8 @@
 # AegisAI - Smart City Risk Intelligence System
 
-![Version](https://img.shields.io/badge/Version-4.1.0-blue)
-![Python](https://img.shields.io/badge/Python-3.10%2B-green)
-![Phase](https://img.shields.io/badge/Phases-1--4%20Complete-success)
-![Tests](https://img.shields.io/badge/Tests-pytest-orange)
 
-## 🎯 Project Overview
-
-**AegisAI** is a production-ready Smart City Risk Intelligence System that transforms raw video feeds into actionable, explainable risk intelligence.
+ Project Overview
+AegisAIis a production-ready Smart City Risk Intelligence System that transforms raw video feeds into actionable, explainable risk intelligence.
 
 ### System Phases
 
