@@ -54,6 +54,26 @@ class AnalysisResponse(BaseModel):
 _detector = None
 _tracker = None
 _risk_scorer = None
+_frame_counter = 0
+
+
+def _extract_detection_fields(det) -> tuple[str, float, List[int], Optional[int]]:
+    """Normalize detector outputs from object or dict shapes."""
+    if hasattr(det, "class_name"):
+        class_name = getattr(det, "class_name", "unknown")
+        confidence = float(getattr(det, "confidence", 0.0))
+        bbox = getattr(det, "bbox", [0, 0, 0, 0])
+        track_id = getattr(det, "track_id", None)
+    else:
+        class_name = det.get('class_name', det.get('label', 'unknown'))
+        confidence = float(det.get('confidence', det.get('score', 0.0)))
+        bbox = det.get('bbox', det.get('box', [0, 0, 0, 0]))
+        track_id = det.get('track_id')
+
+    if not isinstance(bbox, list):
+        bbox = list(bbox)
+
+    return class_name, confidence, bbox, track_id
 
 
 def get_detector():
@@ -74,8 +94,8 @@ def get_tracker():
     global _tracker
     if _tracker is None:
         try:
-            from aegis.tracking.byte_tracker import ByteTracker
-            _tracker = ByteTracker()
+            from aegis.tracking.bytetrack_tracker import ByteTrackTracker
+            _tracker = ByteTrackTracker()
         except Exception as e:
             print(f"Failed to load tracker: {e}")
             return None
@@ -87,8 +107,8 @@ def get_risk_scorer():
     global _risk_scorer
     if _risk_scorer is None:
         try:
-            from aegis.risk.risk_scorer import RiskScorer
-            _risk_scorer = RiskScorer()
+            from aegis.risk.proximity_risk import ProximityRiskEngine
+            _risk_scorer = ProximityRiskEngine()
         except Exception as e:
             print(f"Failed to load risk scorer: {e}")
             return None
@@ -126,6 +146,8 @@ async def analyze_frame(request: FrameRequest):
     """
     import time
     start_time = time.time()
+    global _frame_counter
+    _frame_counter += 1
     
     try:
         # Decode frame
@@ -172,11 +194,17 @@ async def analyze_frame(request: FrameRequest):
         except:
             pass
     
+    # Run risk assessment on all tracks at once (proximity-based)
+    risk_assessment = None
+    if risk_scorer and len(detections_raw) > 0:
+        try:
+            risk_assessment = risk_scorer.assess(detections_raw, frame_id=_frame_counter)
+            max_risk_score = risk_assessment.risk_score
+        except Exception as e:
+            print(f"Risk assessment failed: {e}")
+
     for det in detections_raw:
-        class_name = det.get('class_name', det.get('label', 'unknown'))
-        confidence = det.get('confidence', det.get('score', 0.0))
-        bbox = det.get('bbox', det.get('box', [0, 0, 0, 0]))
-        track_id = det.get('track_id')
+        class_name, confidence, bbox, track_id = _extract_detection_fields(det)
         
         # Count by class
         if class_name.lower() == 'person':
@@ -184,27 +212,23 @@ async def analyze_frame(request: FrameRequest):
         elif class_name.lower() in ['car', 'truck', 'bus', 'motorcycle', 'bicycle']:
             vehicle_count += 1
         
-        # Calculate risk if enabled
+        # Use frame-level risk for each detection
         risk_level = "LOW"
-        risk_score = 0.1
+        risk_score_val = 0.1
         
-        if risk_scorer:
-            try:
-                risk_result = risk_scorer.calculate_risk(det, frame)
-                risk_level = risk_result.get('level', 'LOW')
-                risk_score = risk_result.get('score', 0.1)
-            except:
-                pass
+        if risk_assessment:
+            risk_level = risk_assessment.risk_level
+            risk_score_val = risk_assessment.risk_score
         
-        max_risk_score = max(max_risk_score, risk_score)
+        max_risk_score = max(max_risk_score, risk_score_val)
         
         detections.append(Detection(
             class_name=class_name,
             confidence=confidence,
-            bbox=bbox if isinstance(bbox, list) else list(bbox),
+            bbox=bbox,
             track_id=track_id,
             risk_level=risk_level,
-            risk_score=risk_score
+            risk_score=risk_score_val
         ))
     
     # Determine max risk level

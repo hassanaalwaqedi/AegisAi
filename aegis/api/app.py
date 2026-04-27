@@ -109,7 +109,10 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
     cors_origins = list(config.cors_origins) + [
         "http://localhost:3000", 
         "http://127.0.0.1:3000",
-        "http://192.168.137.1:3000",  # Local network access
+        "http://localhost:5173",      # Vite dev server
+        "http://127.0.0.1:5173",      # Vite dev server
+        "http://192.168.137.1:3000",   # Local network access
+        "http://192.168.137.1:5173",
         "http://192.168.1.1:3000",
     ]
     app.add_middleware(
@@ -159,30 +162,53 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
         logger.warning("WebSocket module not available")
 
     
-    # Serve dashboard if enabled
+    # Serve React SOC dashboard from frontend/dist (production build)
     if config.serve_dashboard:
-        dashboard_path = Path(__file__).parent.parent / "dashboard"
+        frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
         
-        if dashboard_path.exists():
+        if frontend_dist.exists():
+            # Serve static assets (JS, CSS, images)
             app.mount(
-                "/static",
-                StaticFiles(directory=str(dashboard_path)),
-                name="static"
+                "/assets",
+                StaticFiles(directory=str(frontend_dist / "assets")),
+                name="frontend-assets"
             )
             
             @app.get("/dashboard")
             async def dashboard():
-                """Serve dashboard HTML."""
-                index_path = dashboard_path / "index.html"
+                """Serve React SOC dashboard."""
+                index_path = frontend_dist / "index.html"
                 if index_path.exists():
                     return FileResponse(str(index_path))
-                return {"error": "Dashboard not found"}
+                return {"error": "Dashboard not found — run 'npm run build' in frontend/"}
         else:
-            logger.warning(f"Dashboard path not found: {dashboard_path}")
+            logger.info(f"Frontend dist not found: {frontend_dist} — use Vite dev server")
     
     @app.get("/")
     async def root():
-        """API root endpoint."""
+        """Root endpoint — serve React SOC dashboard or API info."""
+        frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
+        idx = frontend_dist / "index.html"
+        if idx.exists():
+            return FileResponse(str(idx))
+        return {
+            "name": "AegisAI API",
+            "version": "5.0.0",
+            "status": "online",
+            "dashboard": "/dashboard",
+            "docs": "/docs" if is_debug_mode() else None,
+            "endpoints": {
+                "status": "/status",
+                "alerts": "/alerts",
+                "tracks": "/tracks",
+                "statistics": "/statistics",
+                "ws": "/ws",
+            }
+        }
+
+    @app.get("/api")
+    async def api_info():
+        """API info endpoint."""
         return {
             "name": "AegisAI API",
             "version": "5.0.0",
@@ -193,6 +219,7 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
                 "statistics": "/statistics",
                 "intelligence": "/intelligence",
                 "dashboard": "/dashboard",
+                "webcam": "/webcam",
                 "docs": "/docs"
             }
         }

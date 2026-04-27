@@ -43,6 +43,16 @@ class DetectionResult:
     risk_score: float
     timestamp: datetime
     frame_id: int
+    # Edge/Cloud hybrid fields
+    object_category: str = "generic"
+    is_weapon: bool = False
+    is_person: bool = False
+    is_animal: bool = False
+    edge_risk_score: float = 0.0
+    edge_triggers: List[str] = field(default_factory=list)
+    cloud_verdict: Optional[str] = None
+    threat_type: Optional[str] = None
+    weapon_type: Optional[str] = None
     
     def to_dict(self) -> dict:
         return {
@@ -56,6 +66,15 @@ class DetectionResult:
             "risk_score": round(self.risk_score, 3),
             "timestamp": self.timestamp.isoformat(),
             "frame_id": self.frame_id,
+            "object_category": self.object_category,
+            "is_weapon": self.is_weapon,
+            "is_person": self.is_person,
+            "is_animal": self.is_animal,
+            "edge_risk_score": round(self.edge_risk_score, 3),
+            "edge_triggers": self.edge_triggers,
+            "cloud_verdict": self.cloud_verdict,
+            "threat_type": self.threat_type,
+            "weapon_type": self.weapon_type,
         }
 
 
@@ -149,6 +168,10 @@ class AICameraPipeline:
         self._trackers: Dict[str, Any] = {}
         self._risk_scorer = None
         
+        # Edge/Cloud hybrid components (lazy loaded)
+        self._edge_filter = None
+        self._cloud_client = None
+        
         logger.info("AICameraPipeline initialized")
     
     def _get_detector(self):
@@ -186,8 +209,31 @@ class AICameraPipeline:
                 logger.error(f"Failed to load risk scorer: {e}")
         return self._risk_scorer
     
+    def _get_edge_filter(self):
+        """Lazy load edge risk filter."""
+        if self._edge_filter is None:
+            try:
+                from aegis.edge.edge_risk_filter import EdgeRiskFilter
+                self._edge_filter = EdgeRiskFilter()
+                logger.info("Edge risk filter loaded")
+            except Exception as e:
+                logger.error(f"Failed to load edge filter: {e}")
+        return self._edge_filter
+    
+    def _get_cloud_client(self):
+        """Lazy load cloud client."""
+        if self._cloud_client is None:
+            try:
+                from aegis.cloud.cloud_client import CloudClient
+                self._cloud_client = CloudClient()
+                self._cloud_client.start()
+                logger.info("Cloud client loaded and started")
+            except Exception as e:
+                logger.error(f"Failed to load cloud client: {e}")
+        return self._cloud_client
+    
     def _process_camera_frame(self, camera_id: str, frame: np.ndarray):
-        """Process a single frame from a camera."""
+        """Process a single frame from a camera through edge pipeline."""
         detector = self._get_detector()
         if detector is None:
             return
@@ -197,20 +243,34 @@ class AICameraPipeline:
         frame_id = self._frame_counters[camera_id]
         
         try:
-            # Run detection
+            # ── Stage 1: YOLO Detection ──
             detections = detector.detect(frame)
             
-            # Run tracking
+            # ── Stage 2: Tracking ──
             tracker = self._get_tracker(camera_id)
             if tracker and detections:
                 tracks = tracker.update(detections, frame)
             else:
                 tracks = detections
             
-            # Get risk scorer
+            # ── Stage 3: Edge Risk Filter ──
+            edge_filter = self._get_edge_filter()
+            edge_assessment = None
+            if edge_filter:
+                edge_assessment = edge_filter.assess(tracks, frame_id)
+            
+            # ── Stage 4: Cloud Escalation (if suspicious) ──
+            if edge_assessment and edge_assessment.should_escalate:
+                cloud_client = self._get_cloud_client()
+                if cloud_client and cloud_client.is_enabled:
+                    event = edge_filter.create_event(
+                        frame, edge_assessment, camera_id
+                    )
+                    cloud_client.enqueue_event(event)
+            
+            # ── Stage 5: Build Detection Results ──
             risk_scorer = self._get_risk_scorer()
             
-            # Process each detection
             for det in tracks:
                 # Extract detection info
                 if hasattr(det, 'bbox'):
@@ -219,14 +279,22 @@ class AICameraPipeline:
                     class_id = det.class_id
                     confidence = det.confidence
                     track_id = getattr(det, 'track_id', None)
+                    is_weapon = getattr(det, 'is_weapon', False)
+                    is_person = getattr(det, 'is_person', False)
+                    is_animal = getattr(det, 'is_animal', False)
+                    category = getattr(det, 'object_category', 'generic')
                 else:
                     bbox = det.get('bbox', det.get('box', (0, 0, 0, 0)))
                     class_name = det.get('class_name', det.get('label', 'unknown'))
                     class_id = det.get('class_id', 0)
                     confidence = det.get('confidence', det.get('score', 0.0))
                     track_id = det.get('track_id')
+                    is_weapon = det.get('is_weapon', False)
+                    is_person = det.get('is_person', False)
+                    is_animal = det.get('is_animal', False)
+                    category = det.get('object_category', 'generic')
                 
-                # Calculate risk
+                # Calculate risk (existing risk scorer)
                 risk_level = "LOW"
                 risk_score = 0.1
                 if risk_scorer:
@@ -236,6 +304,17 @@ class AICameraPipeline:
                         risk_score = risk_result.get('score', 0.1)
                     except:
                         pass
+                
+                # Override with edge risk if higher
+                edge_score = edge_assessment.risk_score if edge_assessment else 0.0
+                if edge_score > risk_score:
+                    risk_score = edge_score
+                    if edge_score >= 0.75:
+                        risk_level = "CRITICAL"
+                    elif edge_score >= 0.50:
+                        risk_level = "HIGH"
+                    elif edge_score >= 0.25:
+                        risk_level = "MEDIUM"
                 
                 # Create detection result
                 result = DetectionResult(
@@ -249,6 +328,12 @@ class AICameraPipeline:
                     risk_score=risk_score,
                     timestamp=datetime.utcnow(),
                     frame_id=frame_id,
+                    object_category=category,
+                    is_weapon=is_weapon,
+                    is_person=is_person,
+                    is_animal=is_animal,
+                    edge_risk_score=edge_score,
+                    edge_triggers=edge_assessment.triggers if edge_assessment else [],
                 )
                 
                 # Store detection

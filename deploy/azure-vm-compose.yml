@@ -1,0 +1,14 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: aegis_api
+    env_file:
+      - ${AZURE_VM_ENV_FILE:-./azure-vm.env}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../data:/app/data
+      - ../models:/app/models
+    restart: unless-stopped

@@ -34,11 +34,19 @@ class Detection(NamedTuple):
         confidence: Detection confidence score [0.0, 1.0]
         class_id: COCO class identifier
         class_name: Human-readable class name
+        object_category: Category string (person/weapon/vehicle/animal/generic)
+        is_weapon: Whether this detection is a weapon
+        is_person: Whether this detection is a person
+        is_animal: Whether this detection is an animal
     """
     bbox: Tuple[int, int, int, int]
     confidence: float
     class_id: int
     class_name: str
+    object_category: str = "generic"
+    is_weapon: bool = False
+    is_person: bool = False
+    is_animal: bool = False
 
 
 class YOLODetector:
@@ -178,11 +186,31 @@ class YOLODetector:
                 # Get class name
                 cls_name = self._class_names.get(cls_id, f"class_{cls_id}")
                 
+                # Classify object category
+                is_person = (cls_id == 0)
+                is_weapon = (cls_id in self._config.weapon_classes)
+                is_animal = (cls_id in self._config.animal_classes)
+                
+                if is_person:
+                    category = "person"
+                elif is_weapon:
+                    category = "weapon"
+                elif is_animal:
+                    category = "animal"
+                elif cls_id in (2, 3, 5, 7):
+                    category = "vehicle"
+                else:
+                    category = "generic"
+                
                 detection = Detection(
                     bbox=(x1, y1, x2, y2),
                     confidence=conf,
                     class_id=cls_id,
-                    class_name=cls_name
+                    class_name=cls_name,
+                    object_category=category,
+                    is_weapon=is_weapon,
+                    is_person=is_person,
+                    is_animal=is_animal,
                 )
                 detections.append(detection)
         

@@ -24,29 +24,36 @@ class DeviceType(Enum):
 @dataclass(frozen=True)
 class DetectionConfig:
     """
-    YOLOv8 Detection Configuration.
+    YOLO Detection Configuration.
+    
+    Supports YOLOv8/v11 with weapon and animal detection classes.
     
     Attributes:
-        model_path: Path to YOLO model weights (default: yolov8n for speed)
+        model_path: Path to YOLO model weights
         confidence_threshold: Minimum confidence for valid detections
         nms_threshold: Non-Maximum Suppression IoU threshold
         target_classes: COCO class IDs to detect
-            - 0: person
-            - 2: car
-            - 3: motorcycle
-            - 5: bus
-            - 7: truck
+        weapon_classes: Class IDs for weapon objects (custom model)
+        animal_classes: COCO class IDs for animals (filter false positives)
         image_size: Input image size for inference
         frame_skip: Process every Nth frame (1=all, 2=every other, etc.)
         half_precision: Use FP16 inference (faster on GPU)
     """
-    model_path: str = "yolov8n.pt"
+    model_path: str = "yolo11n.pt"
     confidence_threshold: float = 0.5
     nms_threshold: float = 0.45
-    target_classes: Tuple[int, ...] = (0, 2, 3, 5, 7)
+    target_classes: Tuple[int, ...] = (0, 2, 3, 5, 7, 14, 15, 16)
     image_size: int = 640
-    frame_skip: int = 1  # Process every frame by default
-    half_precision: bool = True  # Use FP16 for faster inference
+    frame_skip: int = 1
+    half_precision: bool = False  # CPU-safe default; enable on GPU
+    
+    # Weapon detection class IDs (custom-trained model)
+    # These map to custom weapon model outputs
+    weapon_classes: Tuple[int, ...] = ()
+    
+    # COCO animal classes for filtering false positives
+    # 14=bird, 15=cat, 16=dog
+    animal_classes: Tuple[int, ...] = (14, 15, 16)
     
     # Class name mapping for visualization
     CLASS_NAMES: dict = field(default_factory=lambda: {
@@ -54,7 +61,10 @@ class DetectionConfig:
         2: "Car",
         3: "Motorcycle",
         5: "Bus",
-        7: "Truck"
+        7: "Truck",
+        14: "Bird",
+        15: "Cat",
+        16: "Dog",
     })
 
 
@@ -126,14 +136,19 @@ class VisualizationConfig:
     show_track_id: bool = True
     
     # Color palette for different classes (BGR format)
-    # Designed for visual distinction and accessibility
     CLASS_COLORS: dict = field(default_factory=lambda: {
         0: (0, 255, 128),    # Person: Green
         2: (255, 128, 0),    # Car: Blue
         3: (0, 128, 255),    # Motorcycle: Orange
         5: (255, 0, 128),    # Bus: Purple
         7: (128, 255, 0),    # Truck: Cyan
+        14: (200, 200, 0),   # Bird: Teal
+        15: (0, 200, 200),   # Cat: Yellow
+        16: (200, 100, 50),  # Dog: Light Blue
     })
+    
+    # Weapon colors (will be used when weapon model is loaded)
+    WEAPON_COLOR: Tuple[int, int, int] = (0, 0, 255)  # Red
     
     # Default color for unknown classes
     DEFAULT_COLOR: Tuple[int, int, int] = (128, 128, 128)
@@ -296,19 +311,125 @@ class DatabaseConfig:
     auto_cleanup: bool = True
 
 
+@dataclass(frozen=True)
+class EdgeConfig:
+    """
+    Edge Layer Configuration for hybrid edge/cloud architecture.
+    
+    Controls the lightweight risk filter that runs on CPU.
+    Only suspicious events are escalated to the cloud.
+    
+    Attributes:
+        enabled: Whether edge risk filtering is active
+        escalation_threshold: Risk score threshold to send to cloud
+        weapon_detected_score: Risk boost when any weapon is detected
+        weapon_person_coexist_score: Risk boost when weapon + person in frame
+        weapon_person_overlap_score: Risk boost when weapon bbox overlaps person
+        behavioral_anomaly_score: Risk boost for loitering/erratic behavior
+        max_event_queue_size: Max events queued for cloud
+        event_cooldown_seconds: Min seconds between events for same track
+        frame_compression_quality: JPEG quality for cloud-bound frames
+    """
+    enabled: bool = True
+    escalation_threshold: float = 0.4
+    weapon_detected_score: float = 0.5
+    weapon_person_coexist_score: float = 0.3
+    weapon_person_overlap_score: float = 0.2
+    behavioral_anomaly_score: float = 0.15
+    max_event_queue_size: int = 100
+    event_cooldown_seconds: float = 10.0
+    frame_compression_quality: int = 85
+
+
+@dataclass(frozen=True)
+class CloudConfig:
+    """
+    Cloud Layer Configuration for AWS GPU backend.
+    
+    Configures the API client that sends suspicious events
+    to the cloud for deep analysis (CLIP, SAM, MiDaS, etc.).
+    
+    Attributes:
+        enabled: Whether cloud escalation is active
+        api_url: Cloud API server URL
+        api_key: Authentication key for cloud API
+        timeout_seconds: HTTP request timeout
+        max_retries: Number of retry attempts
+        max_queue_size: Max events queued for sending
+        circuit_breaker_failures: Consecutive failures before circuit opens
+        circuit_breaker_reset_seconds: Seconds before retrying after circuit opens
+    """
+    enabled: bool = False
+    api_url: str = ""
+    api_key: str = ""
+    timeout_seconds: float = 5.0
+    max_retries: int = 3
+    max_queue_size: int = 100
+    circuit_breaker_failures: int = 5
+    circuit_breaker_reset_seconds: float = 60.0
+
+
+@dataclass(frozen=True)
+class ByteTrackConfig:
+    """
+    ByteTrack Tracking Configuration (Phase 1, CPU-optimized).
+    
+    Replaces DeepSORT for lightweight, IoU-based tracking.
+    
+    Attributes:
+        track_activation_threshold: Min confidence to start a new track
+        lost_track_buffer: Max frames to keep a lost track
+        minimum_matching_threshold: Min IoU for track-detection matching
+        frame_rate: Expected frame rate for internal track aging
+    """
+    track_activation_threshold: float = 0.25
+    lost_track_buffer: int = 30
+    minimum_matching_threshold: float = 0.8
+    frame_rate: int = 30
+
+
+@dataclass(frozen=True)
+class ProximityRiskConfigData:
+    """
+    Proximity Risk Engine Configuration (Phase 1, CPU-only).
+    
+    Lightweight rule-based risk scoring using person-weapon proximity.
+    
+    Attributes:
+        enabled: Whether proximity risk is active
+        weapon_coexist_score: Risk when weapon+person in same frame
+        weapon_overlap_score: Risk when weapon bbox overlaps person
+        stability_high_score: Risk when pair is stable across frames
+        behavioral_boost: Additional boost for behavioral anomalies
+        stability_window: Consecutive frames for HIGH escalation
+        decay_frames: Frames before inactive pair expires
+        escalation_threshold: Score threshold for cloud escalation
+        iou_threshold: Min IoU to count as overlap
+    """
+    enabled: bool = True
+    weapon_coexist_score: float = 0.5
+    weapon_overlap_score: float = 0.7
+    stability_high_score: float = 0.85
+    behavioral_boost: float = 0.1
+    stability_window: int = 5
+    decay_frames: int = 10
+    escalation_threshold: float = 0.6
+    iou_threshold: float = 0.05
+
+
 @dataclass
 class AegisConfig:
     """
     Master Configuration Container.
     
     Aggregates all sub-configurations for easy access and management.
-    This is the primary configuration object passed throughout the system.
     
     Phase 1: detection, tracking, video, visualization
     Phase 2: analysis
     Phase 3: risk
     Phase 4: alerts, api
     Phase 5: semantic (Grounding DINO)
+    Phase 6: edge/cloud hybrid intelligence
     """
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
@@ -320,6 +441,10 @@ class AegisConfig:
     api: APIConfig = field(default_factory=APIConfig)
     semantic: SemanticConfig = field(default_factory=SemanticConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    edge: EdgeConfig = field(default_factory=EdgeConfig)
+    cloud: CloudConfig = field(default_factory=CloudConfig)
+    bytetrack: ByteTrackConfig = field(default_factory=ByteTrackConfig)
+    proximity_risk: ProximityRiskConfigData = field(default_factory=ProximityRiskConfigData)
     device: DeviceType = DeviceType.AUTO
     
     def get_device_string(self) -> str:

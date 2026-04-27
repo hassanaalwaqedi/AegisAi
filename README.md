@@ -1,187 +1,154 @@
-# AegisAI - Smart City Risk Intelligence System
+# AegisAI — Smart City Risk Intelligence System
 
+> Real-time AI-powered surveillance platform for threat detection, behavioral analysis, and risk intelligence.
 
- Project Overview
-AegisAIis a production-ready Smart City Risk Intelligence System that transforms raw video feeds into actionable, explainable risk intelligence.
+## Architecture
 
-### System Phases
+```
+┌─────────────────────────────────────────────────────────┐
+│  Frontend (React SPA)          Firebase Hosting          │
+│  ├── SOC Dashboard             or Nginx Container        │
+│  ├── 7 Pages (Dashboard, Cameras, Alerts, Analytics...) │
+│  └── WebSocket Real-time ────────────────────────┐      │
+└──────────────────────────────────────────────────┬──────┘
+                                                   │
+                  REST API + WebSocket             │
+                                                   ▼
+┌─────────────────────────────────────────────────────────┐
+│  Backend (FastAPI)             AWS EC2 / ECS             │
+│  ├── 16 REST Routes + /ws endpoint                      │
+│  ├── YOLOv8/v11 Detection Pipeline                      │
+│  ├── ByteTrack Object Tracking                          │
+│  ├── Risk Intelligence Engine                           │
+│  ├── Alert Management System                            │
+│  ├── Gemini AI (NLQ Interface)                          │
+│  ├── Edge/Cloud Hybrid Architecture                     │
+│  └── PostgreSQL + Redis                                 │
+└─────────────────────────────────────────────────────────┘
+```
 
-| Phase | Name | Status | Description |
-|-------|------|--------|-------------|
-| 1 | Perception | ✅ Complete | YOLOv8 detection + DeepSORT tracking |
-| 2 | Analysis | ✅ Complete | Motion & behavior analysis |
-| 3 | Risk | ✅ Complete | Explainable risk scoring |
-| 4 | Response | ✅ Complete | REST API + Dashboard + Alerts |
+## Quick Start (Local Development)
 
----
+### Prerequisites
+- Python 3.10+
+- Node.js 18+
+- Redis (optional for dev)
 
-## 🚀 Quick Start
-
-### Installation
-
+### 1. Backend
 ```bash
-# Clone and setup
+# Clone and install
+git clone https://github.com/your-org/AegisAI.git
 cd AegisAI
+
+# Create virtual environment
 python -m venv venv
-venv\Scripts\activate  # Windows
+source venv/bin/activate  # or venv\Scripts\activate on Windows
+
+# Install dependencies
 pip install -r requirements.txt
-```
 
-### Basic Usage
-
-```bash
-# Process video with full pipeline
-python main.py --input video.mp4 --output out.mp4 --enable-risk
-
-# Start with API server
-python main.py --input 0 --output cam.mp4 --enable-api
-
-# API server standalone
-uvicorn aegis.api.app:app --reload
-```
-
----
-
-## 🔐 Security & API Authentication
-
-**New in Sprint 1:** API endpoints require authentication.
-
-### Configure API Key
-
-```bash
-# Option 1: Environment variable
-export AEGIS_API_KEY="your-secret-key"
-
-# Option 2: .env file
+# Copy environment config
 cp .env.example .env
-# Edit .env and set AEGIS_API_KEY
+# Edit .env with your AEGIS_API_KEY and GEMINI_API_KEY
+
+# Start API server
+python -m uvicorn aegis.api.app:app --host 0.0.0.0 --port 8080
 ```
 
-### Make Authenticated Requests
-
+### 2. Frontend
 ```bash
-curl -H "X-API-Key: your-secret-key" http://localhost:8080/status
+cd frontend
+
+# Install dependencies
+npm install
+
+# Start dev server (proxies API to localhost:8080)
+npm run dev
+# → opens http://localhost:5173
 ```
 
-See [SECURITY.md](SECURITY.md) for full security documentation.
+### 3. Docker (Full Stack)
+```bash
+# Build and start all services
+docker-compose up --build
 
----
+# API:      http://localhost:8080
+# Frontend: http://localhost:3000
+```
 
-## 🧪 Running Tests
+## Deployment
+
+### Frontend → Firebase Hosting
+```bash
+cd frontend
+
+# Set production API URL
+echo "VITE_API_URL=https://api.aegisai.com" > .env.production
+
+# Build and deploy
+npm run deploy
+```
+
+### Backend → AWS
+```bash
+# Build Docker image
+docker build -t aegisai:latest .
+
+# Push to ECR
+aws ecr get-login-password | docker login --username AWS --password-stdin <account>.dkr.ecr.<region>.amazonaws.com
+docker tag aegisai:latest <account>.dkr.ecr.<region>.amazonaws.com/aegisai:latest
+docker push <account>.dkr.ecr.<region>.amazonaws.com/aegisai:latest
+
+# Deploy with ECS or EC2
+```
+
+### Required AWS Services
+| Service | Purpose |
+|---------|---------|
+| EC2 / ECS | Run API container |
+| RDS PostgreSQL | Database |
+| ElastiCache Redis | Caching |
+| ALB | HTTPS + WebSocket |
+| S3 | Recordings storage |
+| Route 53 | DNS |
+| ACM | SSL certificate |
+
+## API Authentication
+
+All API requests require an `X-API-Key` header:
+```bash
+curl -H "X-API-Key: your-key" http://localhost:8080/status
+```
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `AEGIS_API_KEY` | Yes | API authentication key |
+| `DATABASE_URL` | No | PostgreSQL URL (default: SQLite) |
+| `REDIS_URL` | No | Redis URL |
+| `GEMINI_API_KEY` | No | Google Gemini for NLQ |
+| `AEGIS_DEBUG` | No | Enable /docs endpoint |
+
+## Testing
 
 ```bash
 # Run all tests
-pytest -v
+pytest tests/ -v
 
-# Run unit tests only
-pytest tests/unit/ -v
-
-# Run integration tests
-pytest tests/integration/ -v
-
-# Run with coverage
-pytest --cov=aegis --cov-report=html
+# Run smoke tests only
+pytest tests/unit/test_api_smoke.py -v
 ```
 
-### Test Structure
+## Tech Stack
 
-```
-tests/
-├── conftest.py              # Shared fixtures
-├── unit/
-│   ├── test_risk_engine.py
-│   ├── test_alert_manager.py
-│   ├── test_motion_analyzer.py
-│   └── test_behavior_analyzer.py
-└── integration/
-    ├── test_api_endpoints.py
-    └── test_pipeline_flow.py
-```
+| Layer | Technology |
+|-------|-----------|
+| AI/ML | YOLOv8/v11, ByteTrack, Grounding DINO |
+| Backend | FastAPI, SQLAlchemy, Redis |
+| Frontend | React 19, TypeScript, Recharts, Zustand |
+| Infra | Docker, PostgreSQL, Nginx, Firebase |
 
----
+## License
 
-## 🐳 Docker
-
-### Build
-
-```bash
-docker build -t aegisai .
-```
-
-### Run
-
-```bash
-# API server only
-docker run -p 8080:8080 -e AEGIS_API_KEY="your-key" aegisai
-
-# With mounted data
-docker run -p 8080:8080 \
-  -v $(pwd)/data:/app/data \
-  -e AEGIS_API_KEY="your-key" \
-  aegisai
-```
-
----
-
-## 📡 API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/status` | GET | System health |
-| `/events` | GET | Risk events |
-| `/tracks` | GET | Active tracks |
-| `/statistics` | GET | Crowd & risk stats |
-| `/dashboard` | GET | Live UI |
-| `/docs` | GET | OpenAPI docs (debug mode) |
-
----
-
-## 💻 Command-Line Options
-
-| Flag | Description |
-|------|-------------|
-| `--input`, `-i` | Video path or camera index |
-| `--output`, `-o` | Output video path |
-| `--enable-analysis` | Enable Phase 2 |
-| `--enable-risk` | Enable Phase 3 |
-| `--enable-alerts` | Enable alert generation |
-| `--enable-api` | Start REST API server |
-| `--api-port` | API server port (default: 8080) |
-
----
-
-## 📁 Project Structure
-
-```
-AegisAI/
-├── aegis/
-│   ├── detection/       # YOLOv8
-│   ├── tracking/        # DeepSORT
-│   ├── analysis/        # Motion & behavior
-│   ├── risk/            # Risk scoring
-│   ├── alerts/          # Alert system
-│   ├── api/             # REST API
-│   └── dashboard/       # Frontend UI
-├── tests/               # Test suite
-├── config.py            # Configuration
-├── main.py              # Entry point
-├── Dockerfile           # Container build
-├── SECURITY.md          # Security guide
-└── requirements.txt     # Dependencies
-```
-
----
-
-## 📝 Documentation
-
-- [PROJECT_REPORT.md](PROJECT_REPORT.md) - Full technical report
-- [SECURITY.md](SECURITY.md) - API security guide
-- [GAP_ANALYSIS.md](GAP_ANALYSIS.md) - Engineering assessment
-
----
-
-## 🙏 Acknowledgments
-
-- [Ultralytics](https://ultralytics.com/) - YOLOv8
-- [DeepSORT](https://github.com/levan92/deep_sort_realtime) - Tracking
-- [FastAPI](https://fastapi.tiangolo.com/) - REST API
+Proprietary — All rights reserved.

@@ -40,6 +40,11 @@ from aegis.risk.risk_engine import (
     RiskEngineConfig,
     RiskEngine
 )
+from aegis.risk.proximity_risk import (
+    ProximityRiskEngine,
+    ProximityRiskAssessment,
+    ProximityRiskConfig,
+)
 
 __all__ = [
     # Types
@@ -62,4 +67,8 @@ __all__ = [
     "RiskWeights",
     "RiskEngineConfig",
     "RiskEngine",
+    # Phase 1: Proximity Risk (CPU-only)
+    "ProximityRiskEngine",
+    "ProximityRiskAssessment",
+    "ProximityRiskConfig",
 ]
