@@ -20,6 +20,8 @@ class BehaviorType(Enum):
     STATIONARY = auto()
     LOITERING = auto()
     SUDDEN_SPEED_CHANGE = auto()
+    SUDDEN_STOP = auto()
+    DIRECTION_CHANGE = auto()
     DIRECTION_REVERSAL = auto()
     ERRATIC_MOTION = auto()
     RUNNING = auto()
@@ -64,11 +66,19 @@ class MotionState:
     """
     speed: float = 0.0
     speed_smoothed: float = 0.0
+    smoothed_speed: Optional[float] = None
     velocity: Tuple[float, float] = (0.0, 0.0)
     direction: float = 0.0
     acceleration: float = 0.0
     is_moving: bool = False
+    is_stationary: Optional[bool] = None
     distance_traveled: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.smoothed_speed is not None:
+            self.speed_smoothed = self.smoothed_speed
+        if self.is_stationary is not None:
+            self.is_moving = not self.is_stationary
     
     @property
     def direction_degrees(self) -> float:
@@ -98,6 +108,8 @@ class BehaviorFlags:
     is_erratic: bool = False
     is_running: bool = False
     anomaly_score: float = 0.0
+    stationary_duration: float = 0.0
+    direction_variance: float = 0.0
     
     @property
     def has_anomaly(self) -> bool:
@@ -201,6 +213,7 @@ class CrowdMetrics:
     average_density: float = 0.0
     density_variance: float = 0.0
     crowd_detected: bool = False
+    grid_densities: Dict = field(default_factory=dict)
 
 
 @dataclass

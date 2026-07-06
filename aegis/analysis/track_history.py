@@ -15,13 +15,11 @@ Phase 2: Analysis Layer
 """
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from collections import deque
 from dataclasses import dataclass, field
 
 from aegis.analysis.analysis_types import PositionRecord
-from aegis.tracking.deepsort_tracker import Track
-
 # Configure module logger
 logger = logging.getLogger(__name__)
 
@@ -142,7 +140,7 @@ class TrackHistoryManager:
     
     def update(
         self,
-        tracks: List[Track],
+        tracks: List[Any],
         frame_id: int,
         timestamp: float
     ) -> None:
@@ -158,6 +156,8 @@ class TrackHistoryManager:
         updated_ids = set()
         
         for track in tracks:
+            class_id = getattr(track, "class_id", 0)
+            class_name = getattr(track, "class_name", "Unknown")
             # Compute center position
             x1, y1, x2, y2 = track.bbox
             center_x = (x1 + x2) / 2.0
@@ -170,8 +170,8 @@ class TrackHistoryManager:
                 x=center_x,
                 y=center_y,
                 bbox=track.bbox,
-                class_id=track.class_id,
-                class_name=track.class_name
+                class_id=class_id,
+                class_name=class_name
             )
             
             # Update or create history
@@ -193,8 +193,8 @@ class TrackHistoryManager:
                 # Create new history with custom maxlen
                 history = TrackHistory(
                     track_id=track.track_id,
-                    class_id=track.class_id,
-                    class_name=track.class_name,
+                    class_id=class_id,
+                    class_name=class_name,
                     positions=deque([position], maxlen=self._window_size),
                     first_seen_frame=frame_id,
                     first_seen_time=timestamp,

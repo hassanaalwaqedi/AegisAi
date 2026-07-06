@@ -77,7 +77,7 @@ async def get_status():
         "timestamp": datetime.utcnow().isoformat(),
         "system": status,
         "performance": {
-            "fps": status.get("fps", 0),
+            "fps": status.get("current_fps", status.get("fps", 0)),
             "frames_processed": status.get("frames_processed", 0),
             "uptime_seconds": status.get("uptime_seconds", 0)
         },
@@ -85,6 +85,16 @@ async def get_status():
             "active_tracks": status.get("active_tracks", 0),
             "total_alerts": status.get("total_alerts", 0),
             "high_risk_count": status.get("high_risk_count", 0)
+        },
+        "model": {
+            "model_name": status.get("model_name", ""),
+            "supported_classes": status.get("supported_classes", []),
+            "weapon_detection_supported": status.get("weapon_detection_supported", False),
+            "person_detector": status.get("person_detector", {}),
+            "weapon_detector": status.get("weapon_detector", {}),
+            "action_recognition_supported": status.get("action_recognition_supported", False),
+            "pose_estimation_supported": status.get("pose_estimation_supported", False),
+            "semantic_verification_supported": status.get("semantic_verification_supported", False),
         }
     }
 
@@ -139,7 +149,7 @@ async def get_performance():
     gpu_available = False
     try:
         import torch
-        gpu_available = torch.cuda.is_available()
+        gpu_available = bool(getattr(getattr(torch, "cuda", None), "is_available", lambda: False)())
     except ImportError:
         pass
     

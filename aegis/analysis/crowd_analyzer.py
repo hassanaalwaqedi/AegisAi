@@ -16,12 +16,10 @@ Phase 2: Analysis Layer
 """
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 from aegis.analysis.analysis_types import CrowdMetrics, DensityCell
-from aegis.tracking.deepsort_tracker import Track
-
 # Configure module logger
 logger = logging.getLogger(__name__)
 
@@ -87,7 +85,7 @@ class CrowdAnalyzer:
     
     def analyze(
         self,
-        tracks: List[Track],
+        tracks: List[Any],
         frame_shape: Tuple[int, int, int]
     ) -> CrowdMetrics:
         """
@@ -166,7 +164,7 @@ class CrowdAnalyzer:
     
     def _compute_density_map(
         self,
-        tracks: List[Track],
+        tracks: List[Any],
         width: int,
         height: int
     ) -> Tuple[List[List[int]], List[DensityCell]]:
@@ -258,7 +256,7 @@ class CrowdAnalyzer:
     
     def get_zone_density(
         self,
-        tracks: List[Track],
+        tracks: List[Any],
         zone: Tuple[int, int, int, int]
     ) -> int:
         """

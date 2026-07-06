@@ -7,10 +7,21 @@ Covers Phase 1 (Perception) and Phase 2 (Analysis) configurations.
 Designed for production deployment with environment-aware settings.
 """
 
-
+import os
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 from enum import Enum
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+WEAPON_MODEL_PATH = os.getenv("AEGIS_WEAPON_MODEL_PATH", r"C:\Users\Hassan\Downloads\best.pt")
+WEAPON_CONFIDENCE_THRESHOLD = _float_env("AEGIS_WEAPON_CONFIDENCE_THRESHOLD", 0.5)
 
 
 class DeviceType(Enum):
@@ -34,6 +45,8 @@ class DetectionConfig:
         nms_threshold: Non-Maximum Suppression IoU threshold
         target_classes: COCO class IDs to detect
         weapon_classes: Class IDs for weapon objects (custom model)
+        weapon_model_path: Path to the custom weapon detector weights
+        weapon_confidence_threshold: Minimum confidence for weapon detections
         animal_classes: COCO class IDs for animals (filter false positives)
         image_size: Input image size for inference
         frame_skip: Process every Nth frame (1=all, 2=every other, etc.)
@@ -50,6 +63,17 @@ class DetectionConfig:
     # Weapon detection class IDs (custom-trained model)
     # These map to custom weapon model outputs
     weapon_classes: Tuple[int, ...] = ()
+    weapon_model_path: str = WEAPON_MODEL_PATH
+    weapon_confidence_threshold: float = WEAPON_CONFIDENCE_THRESHOLD
+    weapon_model_class_names: dict = field(default_factory=lambda: {
+        0: "knife",
+        1: "pistol",
+    })
+    weapon_internal_class_ids: dict = field(default_factory=lambda: {
+        0: 1000,
+        1: 1001,
+    })
+    weapon_debug_enabled: bool = True
     
     # COCO animal classes for filtering false positives
     # 14=bird, 15=cat, 16=dog

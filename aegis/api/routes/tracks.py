@@ -35,7 +35,9 @@ async def get_tracks(
     
     return {
         "count": len(tracks),
-        "tracks": tracks
+        "tracks": tracks,
+        "object_registry": state.get_object_registry(),
+        "object_registry_count": len(state.get_object_registry()),
     }
 
 
@@ -52,5 +54,7 @@ async def get_concerning_tracks():
     
     return {
         "count": len(tracks),
-        "tracks": tracks
+        "tracks": tracks,
+        "object_registry": state.get_object_registry(),
+        "object_registry_count": len(state.get_object_registry()),
     }

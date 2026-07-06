@@ -27,6 +27,9 @@ np.seterr(all='ignore')
 if __name__ == "__main__":
     import uvicorn
     from aegis.api.app import create_app
+
+    if "--enable-semantic" in sys.argv:
+        os.environ["SEMANTIC_ENABLED"] = "true"
     
     app = create_app()
     

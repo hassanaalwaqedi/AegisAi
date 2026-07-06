@@ -13,6 +13,7 @@ numpy>=1.24.0
 # Phase 4: Response Layer (API)
 fastapi>=0.104.0
 uvicorn>=0.24.0
+python-multipart>=0.0.9
 
 # Database (PostgreSQL)
 sqlalchemy>=2.0.0
@@ -24,6 +25,7 @@ redis>=5.0.0
 
 # AI/LLM (Google Gemini via HTTP)
 requests>=2.31.0
+yt-dlp>=2024.8.6
 
 # Sprint 1: Security & Testing
 python-dotenv>=1.0.0

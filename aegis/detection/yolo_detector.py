@@ -37,7 +37,10 @@ class Detection(NamedTuple):
         object_category: Category string (person/weapon/vehicle/animal/generic)
         is_weapon: Whether this detection is a weapon
         is_person: Whether this detection is a person
+        is_vehicle: Whether this detection is a vehicle
         is_animal: Whether this detection is an animal
+        model_source: Detector model that produced this detection
+        source_class_id: Original class ID emitted by the detector model
     """
     bbox: Tuple[int, int, int, int]
     confidence: float
@@ -46,7 +49,10 @@ class Detection(NamedTuple):
     object_category: str = "generic"
     is_weapon: bool = False
     is_person: bool = False
+    is_vehicle: bool = False
     is_animal: bool = False
+    model_source: str = ""
+    source_class_id: Optional[int] = None
 
 
 class YOLODetector:
@@ -190,6 +196,7 @@ class YOLODetector:
                 is_person = (cls_id == 0)
                 is_weapon = (cls_id in self._config.weapon_classes)
                 is_animal = (cls_id in self._config.animal_classes)
+                is_vehicle = cls_id in (2, 3, 5, 7)
                 
                 if is_person:
                     category = "person"
@@ -197,7 +204,7 @@ class YOLODetector:
                     category = "weapon"
                 elif is_animal:
                     category = "animal"
-                elif cls_id in (2, 3, 5, 7):
+                elif is_vehicle:
                     category = "vehicle"
                 else:
                     category = "generic"
@@ -210,7 +217,10 @@ class YOLODetector:
                     object_category=category,
                     is_weapon=is_weapon,
                     is_person=is_person,
+                    is_vehicle=is_vehicle,
                     is_animal=is_animal,
+                    model_source=self._config.model_path,
+                    source_class_id=cls_id,
                 )
                 detections.append(detection)
         
@@ -268,7 +278,9 @@ class YOLODetector:
                         bbox=(x1, y1, x2, y2),
                         confidence=conf,
                         class_id=cls_id,
-                        class_name=cls_name
+                        class_name=cls_name,
+                        model_source=self._config.model_path,
+                        source_class_id=cls_id,
                     )
                     frame_detections.append(detection)
             

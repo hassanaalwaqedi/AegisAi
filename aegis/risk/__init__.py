@@ -45,6 +45,10 @@ from aegis.risk.proximity_risk import (
     ProximityRiskAssessment,
     ProximityRiskConfig,
 )
+from aegis.risk.person_weapon_association import (
+    PersonWeaponAssociationEngine,
+    WeaponAssociation,
+)
 
 __all__ = [
     # Types
@@ -71,4 +75,7 @@ __all__ = [
     "ProximityRiskEngine",
     "ProximityRiskAssessment",
     "ProximityRiskConfig",
+    # Phase 2: evidence association
+    "PersonWeaponAssociationEngine",
+    "WeaponAssociation",
 ]

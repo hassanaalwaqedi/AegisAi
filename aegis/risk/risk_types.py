@@ -29,7 +29,7 @@ class RiskLevel(Enum):
     CRITICAL = "CRITICAL"
     
     @classmethod
-    def from_score(cls, score: float, thresholds: 'RiskThresholds') -> 'RiskLevel':
+    def from_score(cls, score: float, thresholds: Optional['RiskThresholds'] = None) -> 'RiskLevel':
         """
         Map a risk score to a risk level.
         
@@ -40,6 +40,7 @@ class RiskLevel(Enum):
         Returns:
             Corresponding RiskLevel
         """
+        thresholds = thresholds or RiskThresholds()
         if score >= thresholds.critical:
             return cls.CRITICAL
         elif score >= thresholds.high:

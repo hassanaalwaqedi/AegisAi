@@ -1,0 +1,43 @@
+{
+  "cameras": [
+    {
+      "camera_id": "http-stream-th41x5",
+      "source_type": "HTTP_STREAM",
+      "name": "HTTP Stream",
+      "location": null,
+      "enabled": true,
+      "url": "https://www.youtube.com/watch?v=BAw342Xqxhs",
+      "device_index": null,
+      "video_id": null,
+      "connection_timeout": 5.0,
+      "max_retries": 10,
+      "metadata": {},
+      "created_at": "2026-06-24T00:41:31.514158",
+      "updated_at": "2026-06-24T00:41:31.514357",
+      "upload_path": null
+    },
+    {
+      "camera_id": "http-stream-th426p",
+      "source_type": "HTTP_STREAM",
+      "name": "HTTP Stream",
+      "location": null,
+      "enabled": true,
+      "url": "https://www.youtube.com/watch?v=BAw342Xqxhs",
+      "device_index": null,
+      "video_id": null,
+      "connection_timeout": 5.0,
+      "max_retries": 10,
+      "metadata": {
+        "source_resolver": "yt-dlp",
+        "source_page_url": "https://www.youtube.com/watch?v=BAw342Xqxhs",
+        "resolved_title": "New York Street Ambience 4k Video - City Sounds, Traffic, Sound Effects, 5th Avenue",
+        "resolved_format_id": "298",
+        "resolved_height": 720,
+        "resolved_fps": 60
+      },
+      "created_at": "2026-06-24T00:47:14.960443",
+      "updated_at": "2026-06-24T00:47:14.960595",
+      "upload_path": null
+    }
+  ]
+}

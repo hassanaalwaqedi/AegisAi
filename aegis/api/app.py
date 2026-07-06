@@ -62,6 +62,41 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+def _env_enabled(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _initialize_semantic_state() -> None:
+    """Enable semantic prompt management for API submissions when configured."""
+    if not (
+        _env_enabled("SEMANTIC_ENABLED")
+        or _env_enabled("AEGIS_SEMANTIC_ENABLED")
+        or _env_enabled("AEGIS_ENABLE_SEMANTIC")
+    ):
+        return
+
+    state = get_state()
+    if getattr(state, "semantic_prompt_manager", None) is not None:
+        return
+
+    try:
+        from config import SemanticConfig
+        from aegis.semantic.prompt_manager import PromptManager
+
+        config = SemanticConfig()
+        state.semantic_prompt_manager = PromptManager(cache_ttl=config.cache_ttl_seconds)
+        state.unified_intelligence = []
+        state.active_semantic_query = None
+        state.semantic_triggers = 0
+        state.semantic_matches = 0
+        logger.info("Semantic prompt manager enabled for API queries")
+    except Exception as exc:
+        logger.warning("Semantic prompt manager could not be initialized: %s", exc)
+
+
 @dataclass
 class APIConfig:
     """
@@ -100,6 +135,7 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
         docs_url="/docs" if is_debug_mode() else None,
         redoc_url="/redoc" if is_debug_mode() else None
     )
+    _initialize_semantic_state()
     
     # Add rate limiter
     app.state.limiter = limiter
@@ -142,8 +178,9 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
     # Browser frame analysis router
     app.include_router(analyze_router, dependencies=[Depends(verify_api_key)])
     
-    # Camera management router
-    app.include_router(cameras_router, dependencies=[Depends(verify_api_key)])
+    # Camera management router. REST routes enforce API keys internally;
+    # camera WebSockets use their own connection lifecycle.
+    app.include_router(cameras_router)
     
     # Detection results router
     app.include_router(detections_router, dependencies=[Depends(verify_api_key)])

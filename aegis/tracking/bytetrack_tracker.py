@@ -19,6 +19,20 @@ from aegis.core.interfaces import BaseTracker
 logger = logging.getLogger(__name__)
 
 
+def _bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    x1 = max(a[0], b[0])
+    y1 = max(a[1], b[1])
+    x2 = min(a[2], b[2])
+    y2 = min(a[3], b[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    if inter <= 0:
+        return 0.0
+    area_a = max(0, a[2] - a[0]) * max(0, a[3] - a[1])
+    area_b = max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
 class Track(NamedTuple):
     """Standardized tracking result — compatible with existing pipeline."""
     track_id: int
@@ -30,7 +44,10 @@ class Track(NamedTuple):
     object_category: str = "generic"
     is_weapon: bool = False
     is_person: bool = False
+    is_vehicle: bool = False
     is_animal: bool = False
+    model_source: str = ""
+    source_class_id: Optional[int] = None
 
 
 class ByteTrackTracker(BaseTracker):
@@ -93,7 +110,10 @@ class ByteTrackTracker(BaseTracker):
                 "object_category": getattr(det, "object_category", "generic"),
                 "is_weapon": getattr(det, "is_weapon", False),
                 "is_person": getattr(det, "is_person", False),
+                "is_vehicle": getattr(det, "is_vehicle", False),
                 "is_animal": getattr(det, "is_animal", False),
+                "model_source": getattr(det, "model_source", ""),
+                "source_class_id": getattr(det, "source_class_id", None),
             })
 
         sv_dets = sv.Detections(
@@ -117,8 +137,8 @@ class ByteTrackTracker(BaseTracker):
                 conf = float(tracked.confidence[i]) if tracked.confidence is not None else 0.0
                 cid = int(tracked.class_id[i]) if tracked.class_id is not None else 0
 
-                # Find best matching metadata by class_id
-                meta = next((m for m in metas if m["class_id"] == cid), None)
+                # Match metadata back to the tracked detection by class and bbox IoU.
+                meta = self._match_metadata(bbox, cid, detections, metas)
                 if meta:
                     self._track_metadata[tid] = meta
 
@@ -134,11 +154,28 @@ class ByteTrackTracker(BaseTracker):
                     object_category=stored.get("object_category", "generic"),
                     is_weapon=stored.get("is_weapon", False),
                     is_person=stored.get("is_person", False),
+                    is_vehicle=stored.get("is_vehicle", False),
                     is_animal=stored.get("is_animal", False),
+                    model_source=stored.get("model_source", ""),
+                    source_class_id=stored.get("source_class_id"),
                 ))
 
         logger.debug(f"Active tracks: {len(tracks)}")
         return tracks
+
+    def _match_metadata(self, bbox: Tuple[int, int, int, int], class_id: int, detections: list, metas: list) -> Optional[dict]:
+        best_index = None
+        best_iou = -1.0
+        for index, det in enumerate(detections):
+            if metas[index]["class_id"] != class_id:
+                continue
+            iou = _bbox_iou(bbox, det.bbox)
+            if iou > best_iou:
+                best_iou = iou
+                best_index = index
+        if best_index is None:
+            return None
+        return metas[best_index]
 
     def get_track_count(self) -> int:
         return len(self._track_metadata)
