@@ -156,6 +156,9 @@ class TrackInfo:
     association_score: Optional[float] = None
     stable_frames: int = 0
     evidence_objects: List[Dict[str, Any]] = field(default_factory=list)
+    # Sanitised optional vehicle enrichment only. Raw plate/OCR data remains in
+    # the restricted in-process evidence store and is never copied here.
+    vehicle_enrichment: Dict[str, Any] = field(default_factory=dict)
     movement_state: Optional[str] = None
     time_tracked: float = 0.0
     last_seen: Optional[str] = None
@@ -196,6 +199,7 @@ class TrackInfo:
             "association_score": round(self.association_score, 3) if self.association_score is not None else None,
             "stable_frames": self.stable_frames,
             "evidence_objects": self.evidence_objects,
+            "vehicle_enrichment": self.vehicle_enrichment,
             "movement_state": self.movement_state,
             "time_tracked": round(self.time_tracked, 1),
             "last_seen": self.last_seen,
@@ -225,6 +229,7 @@ class TrackInfo:
             "association_score": round(self.association_score, 3) if self.association_score is not None else None,
             "stable_frames": self.stable_frames,
             "evidence_objects": self.evidence_objects,
+            "vehicle_enrichment": self.vehicle_enrichment,
             "first_seen": self.first_seen,
             "last_seen": self.last_seen,
             "duration_seconds": self._duration_seconds(),
@@ -378,6 +383,7 @@ class APIState:
         association_score: Optional[float] = None,
         stable_frames: int = 0,
         evidence_objects: Optional[List[Dict[str, Any]]] = None,
+        vehicle_enrichment: Optional[Dict[str, Any]] = None,
         movement_state: Optional[str] = None,
         last_seen: Optional[str] = None
     ) -> None:
@@ -422,6 +428,7 @@ class APIState:
                 association_score=association_score,
                 stable_frames=stable_frames,
                 evidence_objects=evidence_objects or [],
+                vehicle_enrichment=vehicle_enrichment or (existing.vehicle_enrichment if existing else {}),
                 movement_state=movement_state,
                 time_tracked=time_tracked,
                 last_seen=last_seen,

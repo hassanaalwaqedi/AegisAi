@@ -1,52 +1,44 @@
 """
-AegisAI - Database Module
-Persistence Layer for Events, Alerts, and Tracks
+AegisAI - Database Module (DEPRECATED)
 
-Provides SQLAlchemy-based persistence with support for:
-- SQLite (default, zero-config)
-- PostgreSQL (production, via DATABASE_URL)
+DEPRECATION NOTICE: This package is superseded by ``aegis.database``.
+All new code should use ``aegis.database`` directly.
 
-Usage:
-    from aegis.db import init_db, get_session, EventRepository, AlertRepository
-    
-    # Initialize database
-    init_db()
-    
-    # Use repositories
-    with get_session() as session:
-        repo = EventRepository(session)
-        repo.create_event(...)
+This module remains for backward compatibility only. It re-exports from
+``aegis.database`` where possible, but will be removed in a future version.
 """
 
-from aegis.db.database import (
-    init_db,
+import warnings
+
+warnings.warn(
+    "aegis.db is deprecated. Use aegis.database instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+# Re-export from the canonical aegis.database package
+from aegis.database.connection import (  # noqa: F401
+    Base,
     get_engine,
     get_session,
-    Base
+    create_tables as init_db,
 )
-from aegis.db.models import (
-    EventModel,
-    AlertModel,
-    TrackSnapshotModel
+from aegis.database.models import (  # noqa: F401
+    Event as EventModel,
+    Alert as AlertModel,
 )
-from aegis.db.repository import (
+from aegis.database.repositories import (  # noqa: F401
     EventRepository,
     AlertRepository,
-    TrackRepository
 )
 
 __all__ = [
-    # Database
     "init_db",
     "get_engine",
     "get_session",
     "Base",
-    # Models
     "EventModel",
     "AlertModel",
-    "TrackSnapshotModel",
-    # Repositories
     "EventRepository",
     "AlertRepository",
-    "TrackRepository",
 ]

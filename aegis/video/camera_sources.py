@@ -1,17 +1,48 @@
 """
 AegisAI production camera source system.
 
-This module provides real camera source management for:
-- local OpenCV devices
-- RTSP streams
-- HTTP video streams
-- browser webcam frame ingestion
-- uploaded video files
+DEPRECATION NOTICE: The camera source classes have moved to ``aegis.camera``.
+This module re-exports them for backward compatibility. New code should import
+directly from ``aegis.camera``.
 
-All source status values are derived from real connection and frame reads.
+The ``FrameIngestionService`` class remains here until it is extracted into
+``aegis.pipeline`` in Phase 1.
 """
 
 from __future__ import annotations
+
+# ---------------------------------------------------------------------------
+# Backward-compatible re-exports from aegis.camera
+# ---------------------------------------------------------------------------
+from aegis.camera.types import (  # noqa: F401
+    CameraSourceType,
+    CameraConnectionStatus,
+    CameraConfig,
+    CameraRuntimeStatus,
+    FrameCallback as FrameCallback,
+    StatusCallback as StatusCallback,
+)
+from aegis.camera.base import BaseCameraSource  # noqa: F401
+from aegis.camera.sources import (  # noqa: F401
+    OpenCVCameraSource,
+    RTSPCameraSource,
+    HTTPCameraSource,
+    BrowserWebcamSource,
+    UploadedVideoSource,
+)
+from aegis.camera.factory import CameraSourceFactory  # noqa: F401
+from aegis.camera.registry import CameraRegistry  # noqa: F401
+from aegis.camera.manager import (  # noqa: F401
+    MultiCameraPipelineManager,
+    CameraHealthMonitor,
+)
+from aegis.camera.utils import (  # noqa: F401
+    mask_url as _mask_url,
+    safe_camera_id as _safe_camera_id,
+    decode_base64_frame as _decode_base64_frame,
+    validate_stream_url as _validate_stream_url,
+    frame_to_data_url,
+)
 
 import base64
 import json
@@ -645,9 +676,13 @@ class FrameIngestionService:
         self._frame_counters: Dict[str, int] = {}
         self._camera_start_ts: Dict[str, float] = {}
         self._high_risk_frames: Dict[str, int] = {}
-        self._configured_zones: set[str] = set()
+        # Per-camera metadata fingerprints let edited zones take effect without
+        # restarting the camera pipeline.
+        self._configured_zones: Dict[str, str] = {}
         self._alert_manager = None
         self._event_repository = None
+        self._vehicle_enrichment_service = None
+        self._vehicle_enrichment_lock = threading.Lock()
         self._events: Deque[Dict[str, Any]] = deque(maxlen=event_buffer_size)
         self._detections: Deque[Dict[str, Any]] = deque(maxlen=event_buffer_size)
         self._emitted_detection_events: set[str] = set()
@@ -815,6 +850,23 @@ class FrameIngestionService:
             explanation = evidence["explanation"]
             factors = evidence["reason_codes"]
 
+            # This optional sidecar is intentionally after normal detection,
+            # tracking, and risk computation. It cannot influence their result.
+            vehicle_enrichment = None
+            if is_vehicle:
+                try:
+                    vehicle_enrichment = self._get_vehicle_enrichment_service().enrich(
+                        camera_id=camera_id,
+                        track_id=raw_track_id,
+                        frame=frame,
+                        bbox=bbox,
+                        high_priority=risk_level in {"HIGH", "CRITICAL"},
+                        frame_token=f"{camera_id}:{frame_id}",
+                    ).to_public_dict()
+                except Exception:
+                    logger.exception("Vehicle enrichment sidecar failed camera_id=%s track_id=%s", camera_id, raw_track_id)
+                    vehicle_enrichment = {"status": "unavailable", "reason": "enrichment_error"}
+
             risk_distribution[risk_level] = risk_distribution.get(risk_level, 0) + 1
             if risk_score > max_risk_score:
                 max_risk_score = risk_score
@@ -852,6 +904,7 @@ class FrameIngestionService:
                 "association_score": evidence["association_score"],
                 "stable_frames": evidence["stable_frames"],
                 "evidence_objects": evidence["evidence_objects"],
+                "vehicle_enrichment": vehicle_enrichment,
                 "detected_classes": frame_detected_classes,
                 "movement_state": movement_state,
                 "speed": float(analysis.motion.speed_smoothed) if analysis else 0.0,
@@ -895,6 +948,7 @@ class FrameIngestionService:
                 association_score=payload["association_score"],
                 stable_frames=payload["stable_frames"],
                 evidence_objects=payload["evidence_objects"],
+                vehicle_enrichment=payload["vehicle_enrichment"],
                 movement_state=movement_state,
                 last_seen=payload["last_seen"],
             )
@@ -1063,6 +1117,19 @@ class FrameIngestionService:
             "semantic_verification_supported": False,
         }
 
+    def _get_vehicle_enrichment_service(self):
+        """Create the optional sidecar lazily, after camera startup succeeds."""
+        if self._vehicle_enrichment_service is None:
+            with self._vehicle_enrichment_lock:
+                if self._vehicle_enrichment_service is None:
+                    from aegis.settings import get_settings
+                    from aegis.video.vehicle_enrichment import VehicleEnrichmentService
+
+                    self._vehicle_enrichment_service = VehicleEnrichmentService(
+                        get_settings().vehicle_enrichment
+                    )
+        return self._vehicle_enrichment_service
+
     def _get_detector(self):
         if self._detector is None:
             with self._detector_lock:
@@ -1156,17 +1223,24 @@ class FrameIngestionService:
         frame: np.ndarray,
         metadata: Optional[Dict[str, Any]],
     ) -> None:
-        if camera_id in self._configured_zones:
-            return
         metadata = metadata or {}
         zones = metadata.get("restricted_zones") or metadata.get("zones") or []
-        if not zones:
-            self._configured_zones.add(camera_id)
+        try:
+            fingerprint = json.dumps(zones, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            fingerprint = repr(zones)
+        if self._configured_zones.get(camera_id) == fingerprint:
             return
 
         from aegis.risk.zone_context import Zone, ZoneType
 
+        # Each risk engine belongs to exactly one camera, so its zone manager
+        # can be rebuilt safely whenever that camera's metadata changes.
+        risk_engine.zone_manager.clear()
+
         for index, zone_data in enumerate(zones):
+            if not isinstance(zone_data, dict):
+                continue
             bounds = zone_data.get("bounds") if isinstance(zone_data, dict) else None
             if not isinstance(bounds, list) or len(bounds) != 4:
                 continue
@@ -1181,7 +1255,7 @@ class FrameIngestionService:
                     description=str(zone_data.get("description", "")),
                 )
             )
-        self._configured_zones.add(camera_id)
+        self._configured_zones[camera_id] = fingerprint
         logger.info("Configured %s risk zones for camera %s", risk_engine.zone_manager.zone_count, camera_id)
 
     def _behavior_labels(self, behavior: Any) -> List[str]:
@@ -1730,6 +1804,11 @@ class FrameIngestionService:
         event_payload = {
             "id": event_id,
             "event_id": event_id,
+            # This marker makes the operational context distinguish confirmed
+            # risk alerts from ordinary detection events without changing risk
+            # scoring or alert-trigger behaviour.
+            "type": "risk_alert",
+            "event_type": "risk_alert",
             "camera_id": camera_id,
             "track_id": track_key,
             "timestamp": timestamp.isoformat(),
@@ -1799,6 +1878,7 @@ class FrameIngestionService:
     def _persist_event(self, event: Dict[str, Any]) -> None:
         try:
             from aegis.database.connection import get_db_session
+            from aegis.database.persistence import get_persistence_status
             from aegis.database.repositories import EventRepository
 
             raw_track_id = str(event.get("track_id", "")).split(":")[-1]
@@ -1815,8 +1895,17 @@ class FrameIngestionService:
                     zone=event.get("camera_id"),
                     metadata=event,
                 )
+            get_persistence_status().record_success("camera_ingestion")
         except Exception as exc:
-            logger.debug("Event repository persistence unavailable: %s", exc)
+            # Camera ingestion remains non-blocking, but the operational view
+            # must expose the failed durable write as degraded.
+            try:
+                from aegis.database.persistence import get_persistence_status
+
+                get_persistence_status().record_failure("camera_ingestion", exc)
+            except Exception:
+                pass
+            logger.warning("Event repository persistence failed: %s", exc)
 
     def _frame_explanation(self, tracks: List[Dict[str, Any]]) -> str:
         if not tracks:

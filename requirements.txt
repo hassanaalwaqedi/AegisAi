@@ -1,50 +1,62 @@
-# AegisAI - Smart City Risk Intelligence System
+# AegisAI - AI Security Operating System
 # Python 3.10+ required
 
-# Phase 1: Perception Layer
+# ─── Core AI / Perception ─────────────────────────────────
 ultralytics>=8.0.0
-supervision>=0.18.0          # ByteTrack tracker (CPU-friendly)
+supervision>=0.18.0            # ByteTrack tracker (CPU-friendly)
 opencv-python>=4.8.0
 numpy>=1.24.0
 
-# Optional: DeepSORT (heavier, requires appearance model)
-# deep-sort-realtime>=1.3.2
+# Vehicle intelligence runtime. These packages do not download model weights at
+# install time; all enrichment features remain disabled until explicitly
+# configured. PaddleOCR is intentionally isolated in
+# requirements-vehicle-ocr-isolated.txt because its upstream dependencies pull
+# opencv-contrib-python, which must not be co-installed with opencv-python.
+av==16.0.1
+prometheus-client==0.24.1
+ImageHash==4.3.2
+timm==1.0.28
+transformers==4.57.6
 
-# Phase 4: Response Layer (API)
+# ─── API Framework ────────────────────────────────────────
 fastapi>=0.104.0
 uvicorn>=0.24.0
 python-multipart>=0.0.9
+websockets>=11.0.3
 
-# Database (PostgreSQL)
+# ─── Configuration & Validation ───────────────────────────
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+
+# ─── Database ─────────────────────────────────────────────
 sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.9
 alembic>=1.13.0
 
-# Caching (Redis)
+# ─── Caching & Event Bus ──────────────────────────────────
 redis>=5.0.0
+msgpack>=1.0.0                   # Fast binary serialization for event bus
 
-# AI/LLM (Google Gemini via HTTP)
+# ─── Security ─────────────────────────────────────────────
+slowapi>=0.1.9
+
+# ─── HTTP / External APIs ────────────────────────────────
 requests>=2.31.0
 yt-dlp>=2024.8.6
+# Official server SDK for Gemini Live (native audio WebSocket sessions).
+# Imported lazily so deployments that leave Live disabled do not need to
+# initialise an external AI client during normal API startup.
+google-genai>=1.0.0,<2.0.0
 
-# Sprint 1: Security & Testing
-python-dotenv>=1.0.0
-slowapi>=0.1.9
+# ─── Testing ──────────────────────────────────────────────
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
 httpx>=0.25.0
 
-# Phase 6: Edge/Cloud Hybrid Intelligence
-# Edge layer (always installed)
-requests>=2.31.0
-
-# Optional: GPU Acceleration (uncomment if using CUDA)
+# ─── Optional: GPU Acceleration (uncomment if using CUDA)
 # torch>=2.0.0
 # torchvision>=0.15.0
 
-# Optional: Cloud Layer - AWS GPU Models (install on EC2 only)
-# transformers>=4.30.0     # CLIP
-# timm>=0.9.0              # MiDaS backbone
-# mediapipe>=0.10.0        # Pose estimation
-# pytorchvideo>=0.1.5      # SlowFast action recognition
-
+# ─── Optional: DeepSORT (heavier, requires appearance model)
+# deep-sort-realtime>=1.3.2

@@ -53,7 +53,10 @@ def init_engine(database_url: str = None):
     _SessionLocal = sessionmaker(
         autocommit=False,
         autoflush=False,
-        bind=_engine
+        bind=_engine,
+        # Service methods may safely return newly-created ORM projections after
+        # their transaction completes, without issuing a second database read.
+        expire_on_commit=False,
     )
     
     logger.info("Database engine initialized")
@@ -102,6 +105,10 @@ def get_db_session() -> Generator[Session, None, None]:
 
 def create_tables():
     """Create all tables from models."""
+    # Importing the model module registers every mapped table on this
+    # connection module's shared SQLAlchemy Base before create_all runs.
+    from . import models  # noqa: F401
+
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created")

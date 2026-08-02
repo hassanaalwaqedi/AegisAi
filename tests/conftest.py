@@ -200,4 +200,7 @@ def api_client():
 @pytest.fixture
 def api_headers():
     """Get headers with valid API key."""
-    return {"X-API-Key": "test-api-key-12345"}
+    # Some isolated API smoke tests set their own process-level test key at
+    # collection time.  Read the active value so integration fixtures remain
+    # authenticated regardless of collection order.
+    return {"X-API-Key": os.environ["AEGIS_API_KEY"]}

@@ -35,12 +35,3 @@ export function ErrorState({ error, title = "Backend data unavailable" }: { erro
     </Card>
   );
 }
-
-export function CapabilityGap({ title, description }: { title: string; description: string }) {
-  return (
-    <Card className="border-amber-300/20 bg-amber-300/[0.055]">
-      <h3 className="text-sm font-semibold text-amber-100">{title}</h3>
-      <p className="mt-2 text-sm leading-6 text-amber-100/72">{description}</p>
-    </Card>
-  );
-}

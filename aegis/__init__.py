@@ -1,32 +1,33 @@
-# === WARNING SUPPRESSION (MUST BE FIRST) ===
+# Suppress only the known numpy MINGW warning that crashes Python 3.14 on Windows.
+# All other warnings should surface — blanket suppression hides real bugs.
 import warnings
 import os
-warnings.filterwarnings('ignore')
-warnings.filterwarnings('ignore', category=RuntimeWarning)
-warnings.filterwarnings('ignore', category=DeprecationWarning)
-os.environ['PYTHONWARNINGS'] = 'ignore'
-# === END WARNING SUPPRESSION ===
+warnings.filterwarnings('ignore', message='.*Numpy built with MINGW.*')
+os.environ.setdefault('PYTHONWARNINGS', 'default')
+
+# Configure structured logging on first import
+from aegis.core.logging import setup_logging as _setup_logging
+_setup_logging(
+    debug=os.getenv("AEGIS_DEBUG", "").lower() in ("1", "true", "yes"),
+    level=os.getenv("AEGIS_LOG_LEVEL") or None,
+)
 
 """
-AegisAI - Smart City Risk Intelligence System
+AegisAI - AI Security Operating System
 Core Package
 
-Phase 1: Perception Layer
-- Real-time object detection (persons and vehicles)
-- Multi-object tracking with unique IDs
-- Video processing and visualization
-
-Phase 2: Analysis Layer
-- Track history and time series management
-- Motion analysis (speed, direction, acceleration)
-- Behavior detection (loitering, anomalies)
-- Crowd analysis (density, hotspots)
+Phase 1: Perception Layer (Detection + Tracking)
+Phase 2: Analysis Layer (Motion + Behavior + Crowd)
+Phase 3: Risk Intelligence Layer
+Phase 4: Response Layer (API + Alerts)
+Phase 5: Semantic Intelligence Layer
+Phase 6: Edge/Cloud Hybrid Intelligence
 
 Copyright 2024 AegisAI Project
 """
 
-__version__ = "4.0.0"
-__phase__ = "Phase 1-6 | Hybrid Edge/Cloud Intelligence"
+__version__ = "5.0.0"
+__phase__ = "Phase 0-6 | AI Security Operating System"
 __author__ = "AegisAI Team"
 
 # Phase 1 exports (conditional - requires ultralytics)

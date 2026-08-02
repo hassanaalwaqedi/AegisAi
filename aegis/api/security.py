@@ -9,6 +9,7 @@ Sprint 1: Security & Testing Foundation
 
 import os
 import logging
+import secrets
 from functools import wraps
 from typing import Callable, Optional
 
@@ -30,6 +31,11 @@ def get_api_key() -> Optional[str]:
         API key string or None if not configured
     """
     return os.getenv("AEGIS_API_KEY")
+
+
+def get_admin_api_key() -> Optional[str]:
+    """Return the distinct server-side key required for administrative writes."""
+    return os.getenv("AEGIS_ADMIN_API_KEY")
 
 
 def get_allowed_origins() -> list:
@@ -115,7 +121,7 @@ async def verify_api_key(request: Request) -> bool:
             headers={"WWW-Authenticate": "ApiKey"}
         )
     
-    if provided_key != expected_key:
+    if not secrets.compare_digest(provided_key, expected_key):
         logger.warning(f"Invalid API key from {get_remote_address(request)}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -124,6 +130,32 @@ async def verify_api_key(request: Request) -> bool:
         )
     
     return True
+
+
+async def verify_admin_api_key(request: Request) -> str:
+    """Require normal API access plus an explicitly configured admin credential.
+
+    The project does not yet have a user/role identity provider.  Failing closed
+    here prevents a normal operator API key from becoming a write credential.
+    """
+    await verify_api_key(request)
+    expected_key = get_admin_api_key()
+    if not expected_key:
+        logger.error("Administrative system-knowledge endpoint requested without AEGIS_ADMIN_API_KEY configured")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Administrative knowledge access is not configured.",
+        )
+    provided_key = request.headers.get("X-Aegis-Admin-Key")
+    if not provided_key or not secrets.compare_digest(provided_key, expected_key):
+        logger.warning("Invalid administrative credential from %s", get_remote_address(request))
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator permission is required.",
+        )
+    # There is no authenticated user identity in the current API-key scheme;
+    # audit the approved administrative principal rather than a forged header.
+    return "api-key-admin"
 
 
 def require_api_key(func: Callable) -> Callable:

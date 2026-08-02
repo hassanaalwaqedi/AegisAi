@@ -28,7 +28,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
@@ -100,6 +100,8 @@ desktop.ini
 *.pt
 *.pth
 *.onnx
+*.engine
+*.plan
 *.weights
 *.h5
 *.pb

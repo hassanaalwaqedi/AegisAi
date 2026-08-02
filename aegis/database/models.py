@@ -4,17 +4,29 @@ AegisAI - SQLAlchemy ORM Models
 All database models for PostgreSQL persistence.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, DateTime, 
-    Text, ForeignKey, ARRAY, JSON
+    Text, ForeignKey, JSON, Uuid, CheckConstraint, Index, UniqueConstraint
 )
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 import uuid
 
 from .connection import Base
+
+
+# The active persistence stack supports PostgreSQL and the repository's local
+# SQLite deployment.  Keep PostgreSQL's JSONB optimization while using a
+# portable JSON representation for SQLite.  Embeddings are persisted as JSON
+# arrays in the portable schema rather than PostgreSQL-only ARRAY values.
+JSONValue = JSON().with_variant(JSONB, "postgresql")
+UUIDValue = Uuid(as_uuid=True)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 # =========================================
@@ -32,9 +44,11 @@ class Event(Base):
     risk_level = Column(String(20))
     risk_score = Column(Float)
     message = Column(Text, nullable=False)
-    factors = Column(JSONB)
+    factors = Column(JSONValue)
     zone = Column(String(50))
-    metadata = Column(JSONB)
+    # ``metadata`` is reserved by SQLAlchemy's declarative base.  Retain the
+    # physical column name for compatibility while using a safe Python name.
+    event_metadata = Column("metadata", JSONValue)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     
     alerts = relationship("Alert", back_populates="event")
@@ -88,7 +102,7 @@ class TrackStats(Base):
     last_seen = Column(DateTime(timezone=True), nullable=False)
     total_frames = Column(Integer, default=0)
     max_risk_score = Column(Float, default=0.0)
-    behaviors_detected = Column(JSONB, default=[])
+    behaviors_detected = Column(JSONValue, default=[])
 
 
 class SessionRecord(Base):
@@ -113,14 +127,14 @@ class BehavioralSession(Base):
     """User behavioral sessions for analytics."""
     __tablename__ = "behavioral_sessions"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(UUIDValue, primary_key=True, default=uuid.uuid4)
     session_id = Column(String(100), unique=True, nullable=False)
     user_hash = Column(String(64))
     intent = Column(String(30))
     scroll_depth_max = Column(Float, default=0.0)
     rage_clicks = Column(Integer, default=0)
     hesitation_count = Column(Integer, default=0)
-    decision_path = Column(JSONB, default=[])
+    decision_path = Column(JSONValue, default=[])
     event_count = Column(Integer, default=0)
     churn_probability = Column(Float)
     conversion_probability = Column(Float)
@@ -148,7 +162,7 @@ class BehaviorEvent(Base):
     session_id = Column(String(100), nullable=False, index=True)
     event_type = Column(String(50), nullable=False)
     timestamp = Column(DateTime(timezone=True), nullable=False)
-    properties = Column(JSONB, default={})
+    properties = Column(JSONValue, default={})
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -158,7 +172,7 @@ class BehaviorEmbedding(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(String(100), unique=True, nullable=False)
-    embedding = Column(ARRAY(Float), nullable=False)
+    embedding = Column(JSONValue, nullable=False)
     cluster_id = Column(Integer)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
@@ -180,8 +194,8 @@ class TelemetrySpan(Base):
     end_time = Column(DateTime(timezone=True))
     duration_ms = Column(Float)
     status = Column(String(20), default="ok")
-    attributes = Column(JSONB, default={})
-    events = Column(JSONB, default=[])
+    attributes = Column(JSONValue, default={})
+    events = Column(JSONValue, default=[])
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -193,7 +207,7 @@ class TelemetryMetric(Base):
     name = Column(String(200), nullable=False, index=True)
     value = Column(Float, nullable=False)
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
-    labels = Column(JSONB, default={})
+    labels = Column(JSONValue, default={})
     unit = Column(String(30))
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
@@ -209,7 +223,7 @@ class Anomaly(Base):
     current_value = Column(Float, nullable=False)
     expected_value = Column(Float, nullable=False)
     deviation = Column(Float, nullable=False)
-    context = Column(JSONB, default={})
+    context = Column(JSONValue, default={})
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     
     def to_dict(self) -> dict:
@@ -230,14 +244,14 @@ class SmartAlertRecord(Base):
     """Smart alerts with root cause analysis."""
     __tablename__ = "smart_alerts"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(UUIDValue, primary_key=True, default=uuid.uuid4)
     alert_id = Column(String(100), unique=True, nullable=False)
     title = Column(String(300), nullable=False)
     description = Column(Text, nullable=False)
     priority = Column(Integer, nullable=False)
     status = Column(String(30), default="open")
-    root_cause = Column(JSONB)
-    related_metrics = Column(JSONB, default=[])
+    root_cause = Column(JSONValue)
+    related_metrics = Column(JSONValue, default=[])
     auto_heal_attempted = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     resolved_at = Column(DateTime(timezone=True))
@@ -268,7 +282,7 @@ class NLQQuery(Base):
     query_type = Column(String(30), nullable=False)
     answer = Column(Text, nullable=False)
     confidence = Column(Float, nullable=False)
-    data = Column(JSONB)
+    data = Column(JSONValue)
     sql_generated = Column(Text)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
@@ -277,7 +291,7 @@ class InsightRecord(Base):
     """Generated business insights."""
     __tablename__ = "insights"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(UUIDValue, primary_key=True, default=uuid.uuid4)
     insight_id = Column(String(100), unique=True, nullable=False)
     insight_type = Column(String(30), nullable=False)
     priority = Column(Integer, nullable=False)
@@ -285,8 +299,8 @@ class InsightRecord(Base):
     description = Column(Text, nullable=False)
     impact = Column(Text)
     confidence = Column(Float, nullable=False)
-    data_points = Column(JSONB, default=[])
-    action_items = Column(JSONB, default=[])
+    data_points = Column(JSONValue, default=[])
+    action_items = Column(JSONValue, default=[])
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     
     def to_dict(self) -> dict:
@@ -318,3 +332,67 @@ class ConsentRecord(Base):
     ip_address = Column(String(45))
     user_agent = Column(Text)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+# =========================================
+# Official system knowledge
+# =========================================
+
+class SystemKnowledge(Base):
+    """Versioned, administratively maintained facts used to ground Aegis AI."""
+
+    __tablename__ = "system_knowledge"
+    __table_args__ = (
+        CheckConstraint("visibility IN ('public', 'private')", name="ck_system_knowledge_visibility"),
+        CheckConstraint(
+            "category IN ('creator_profile', 'creator_contributions', 'project_profile', "
+            "'project_purpose', 'project_architecture', 'project_capabilities', "
+            "'project_technology', 'project_security', 'project_limitations')",
+            name="ck_system_knowledge_category",
+        ),
+        CheckConstraint("priority >= 0 AND priority <= 1000", name="ck_system_knowledge_priority"),
+        CheckConstraint("version >= 1", name="ck_system_knowledge_version"),
+        UniqueConstraint("key", "version", name="uq_system_knowledge_key_version"),
+        Index("ix_system_knowledge_retrieval", "category", "visibility", "is_active"),
+    )
+
+    id = Column(UUIDValue, primary_key=True, default=uuid.uuid4)
+    key = Column(String(160), nullable=False, index=True)
+    category = Column(String(64), nullable=False, index=True)
+    title = Column(String(300), nullable=False)
+    content = Column(Text, nullable=False)
+    content_ar = Column(Text)
+    content_en = Column(Text)
+    content_tr = Column(Text)
+    structured_data = Column(JSONValue, nullable=False, default=dict)
+    visibility = Column(String(16), nullable=False, default="public", index=True)
+    priority = Column(Integer, nullable=False, default=100)
+    source = Column(String(300), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    version = Column(Integer, nullable=False, default=1)
+    created_by = Column(String(160))
+    updated_by = Column(String(160))
+    published_at = Column(DateTime(timezone=True))
+    deleted_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now, onupdate=_utc_now)
+
+
+class SystemKnowledgeAudit(Base):
+    """Append-only audit entries for administrative knowledge changes."""
+
+    __tablename__ = "system_knowledge_audit"
+    __table_args__ = (
+        Index("ix_system_knowledge_audit_record_created", "record_id", "created_at"),
+    )
+
+    id = Column(UUIDValue, primary_key=True, default=uuid.uuid4)
+    record_id = Column(UUIDValue, ForeignKey("system_knowledge.id"), nullable=False, index=True)
+    key = Column(String(160), nullable=False, index=True)
+    action = Column(String(32), nullable=False)
+    actor = Column(String(160), nullable=False)
+    before = Column(JSONValue)
+    after = Column(JSONValue)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now)
+
+    record = relationship("SystemKnowledge")

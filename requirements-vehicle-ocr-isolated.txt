@@ -1,0 +1,9 @@
+# Optional PaddleOCR runtime for an isolated OCR worker/service only.
+#
+# Do NOT install this file into the primary Aegis environment: PaddleOCR's
+# upstream OCR extra currently installs opencv-contrib-python, while Aegis uses
+# opencv-python. The two OpenCV distributions must not be co-installed.
+#
+# This package does not include model weights. Configure local OCR model paths
+# before enabling PLATE_OCR_ENABLED in an OCR-capable deployment.
+paddleocr==3.7.0

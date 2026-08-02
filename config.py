@@ -20,7 +20,7 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
-WEAPON_MODEL_PATH = os.getenv("AEGIS_WEAPON_MODEL_PATH", r"C:\Users\Hassan\Downloads\best.pt")
+WEAPON_MODEL_PATH = os.getenv("AEGIS_WEAPON_MODEL_PATH", os.path.join("models", "weapon_detector.pt"))
 WEAPON_CONFIDENCE_THRESHOLD = _float_env("AEGIS_WEAPON_CONFIDENCE_THRESHOLD", 0.5)
 
 

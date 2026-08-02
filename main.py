@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-# === WARNING SUPPRESSION (MUST BE FIRST) ===
+# Suppress only the known numpy MINGW warning (Python 3.14 / Windows)
 import warnings
 import os
-warnings.filterwarnings('ignore')
-warnings.filterwarnings('ignore', category=RuntimeWarning)
-warnings.filterwarnings('ignore', category=DeprecationWarning)
-os.environ['PYTHONWARNINGS'] = 'ignore'
-# === END WARNING SUPPRESSION ===
+warnings.filterwarnings('ignore', message='.*Numpy built with MINGW.*')
 
 """
 AegisAI - Smart City Risk Intelligence System
@@ -127,12 +123,7 @@ except ImportError:
     SEMANTIC_AVAILABLE = False
 
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+# Logging is configured by aegis.core.logging (called in aegis/__init__.py)
 logger = logging.getLogger("AegisAI")
 
 
@@ -954,94 +945,8 @@ def run_perception_pipeline(
     return stats
 
 
-def draw_analysis_overlay(
-    frame,
-    analysis: 'FrameAnalysis'
-):
-    """
-    Draw analysis-specific annotations on frame.
-    
-    Args:
-        frame: Video frame to annotate
-        analysis: Frame analysis results
-        
-    Returns:
-        Annotated frame
-    """
-    # Highlight anomalous tracks
-    for ta in analysis.track_analyses:
-        if ta.behavior.has_anomaly:
-            x1, y1, x2, y2 = ta.current_bbox
-            
-            # Draw red warning border
-            cv2.rectangle(
-                frame,
-                (x1 - 3, y1 - 3),
-                (x2 + 3, y2 + 3),
-                (0, 0, 255),  # Red
-                2
-            )
-            
-            # Add behavior label
-            behaviors = ta.behavior.active_behaviors
-            if behaviors:
-                # Get primary behavior (excluding NORMAL)
-                primary = next(
-                    (b for b in behaviors if b.name != "NORMAL"),
-                    behaviors[0]
-                )
-                label = primary.name.replace("_", " ")
-                
-                cv2.putText(
-                    frame,
-                    label,
-                    (x1, y2 + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (0, 0, 255),
-                    2,
-                    cv2.LINE_AA
-                )
-    
-    return frame
-
-
-def draw_risk_overlay(
-    frame,
-    risk_summary: 'FrameRiskSummary'
-):
-    """
-    Draw risk-specific annotations on frame.
-    
-    Args:
-        frame: Video frame to annotate
-        risk_summary: Frame risk summary
-        
-    Returns:
-        Annotated frame
-    """
-    for risk in risk_summary.track_risks:
-        if risk.is_concerning:
-            # Get risk color based on level
-            color = risk.level.color_bgr
-            
-            # Add risk label at frame level if critical
-            if risk.level.value == "CRITICAL":
-                summary_text = risk.explanation.summary if risk.explanation else "Critical risk detected"
-                label = f"CRITICAL: {summary_text[:50]}"
-                cv2.putText(
-                    frame,
-                    label,
-                    (10, frame.shape[0] - 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2,
-                    cv2.LINE_AA
-                )
-                break  # Only show one critical message
-    
-    return frame
+# Overlay rendering is now in aegis.pipeline.overlays
+from aegis.pipeline.overlays import draw_analysis_overlay, draw_risk_overlay  # noqa: F401
 
 
 def print_summary(stats: dict, output_path: str) -> None:

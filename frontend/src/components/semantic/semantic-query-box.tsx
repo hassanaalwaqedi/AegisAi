@@ -9,9 +9,10 @@ import { useSemanticQueryMutation } from "@/hooks/use-aegis-api";
 import { ErrorState } from "@/components/layout/states";
 
 const promptExamples = [
-  "detect people carrying weapons",
-  "find suspicious loitering near restricted areas",
-  "identify crowd density risks"
+  "find confirmed people carrying weapons",
+  "find loitering near restricted areas",
+  "show crowd density risks",
+  "show high risk activity"
 ];
 
 export function SemanticQueryBox() {
@@ -22,8 +23,8 @@ export function SemanticQueryBox() {
     <Card>
       <CardHeader>
         <div>
-          <CardTitle>Semantic Query</CardTitle>
-          <p className="mt-1 text-sm text-slate-400">Submits operator prompts to POST /semantic/query</p>
+          <CardTitle>Search live evidence</CardTitle>
+          <p className="mt-1 text-sm text-slate-400">Searches verified tracks, events, associations, and crowd metrics. It does not guess unverified visual attributes.</p>
         </div>
       </CardHeader>
 
@@ -55,7 +56,7 @@ export function SemanticQueryBox() {
 
       {mutation.isSuccess ? (
         <div className="mt-4 rounded-md border border-emerald-300/20 bg-emerald-400/[0.055] p-3 text-sm text-emerald-100">
-          {mutation.data.message}
+          {mutation.data.message}{mutation.data.execution_ms !== undefined ? ` Completed in ${mutation.data.execution_ms.toFixed(1)} ms.` : ""}
         </div>
       ) : null}
 

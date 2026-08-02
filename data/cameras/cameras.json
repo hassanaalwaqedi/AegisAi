@@ -1,42 +1,42 @@
 {
   "cameras": [
     {
-      "camera_id": "http-stream-th41x5",
+      "camera_id": "http-stream-tiwfw7",
       "source_type": "HTTP_STREAM",
       "name": "HTTP Stream",
       "location": null,
       "enabled": true,
-      "url": "https://www.youtube.com/watch?v=BAw342Xqxhs",
-      "device_index": null,
-      "video_id": null,
-      "connection_timeout": 5.0,
-      "max_retries": 10,
-      "metadata": {},
-      "created_at": "2026-06-24T00:41:31.514158",
-      "updated_at": "2026-06-24T00:41:31.514357",
-      "upload_path": null
-    },
-    {
-      "camera_id": "http-stream-th426p",
-      "source_type": "HTTP_STREAM",
-      "name": "HTTP Stream",
-      "location": null,
-      "enabled": true,
-      "url": "https://www.youtube.com/watch?v=BAw342Xqxhs",
+      "url": "https://www.youtube.com/watch?v=eO19UTm93GQ",
       "device_index": null,
       "video_id": null,
       "connection_timeout": 5.0,
       "max_retries": 10,
       "metadata": {
         "source_resolver": "yt-dlp",
-        "source_page_url": "https://www.youtube.com/watch?v=BAw342Xqxhs",
-        "resolved_title": "New York Street Ambience 4k Video - City Sounds, Traffic, Sound Effects, 5th Avenue",
-        "resolved_format_id": "298",
+        "source_page_url": "https://www.youtube.com/watch?v=eO19UTm93GQ",
+        "resolved_title": "Sysvideo 4K 8 Megapixel  IP Camera Demo traffic car",
+        "resolved_format_id": "136",
         "resolved_height": 720,
-        "resolved_fps": 60
+        "resolved_fps": 25
       },
-      "created_at": "2026-06-24T00:47:14.960443",
-      "updated_at": "2026-06-24T00:47:14.960595",
+      "created_at": "2026-07-28T19:09:47.294438",
+      "updated_at": "2026-07-28T19:09:47.315044",
+      "upload_path": null
+    },
+    {
+      "camera_id": "local-device-tj0134",
+      "source_type": "LOCAL_DEVICE",
+      "name": "Local Device",
+      "location": null,
+      "enabled": true,
+      "url": null,
+      "device_index": 0,
+      "video_id": null,
+      "connection_timeout": 5.0,
+      "max_retries": 10,
+      "metadata": {},
+      "created_at": "2026-07-30T17:40:17.366817",
+      "updated_at": "2026-07-30T17:40:17.367195",
       "upload_path": null
     }
   ]

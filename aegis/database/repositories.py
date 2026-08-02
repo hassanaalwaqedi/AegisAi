@@ -12,8 +12,63 @@ from sqlalchemy import desc
 from .models import (
     Event, Alert, TrackStats, BehavioralSession, BehaviorEvent,
     BehaviorEmbedding, TelemetrySpan, TelemetryMetric, Anomaly,
-    SmartAlertRecord, NLQQuery, InsightRecord, ConsentRecord
+    SmartAlertRecord, NLQQuery, InsightRecord, ConsentRecord,
+    SystemKnowledge, SystemKnowledgeAudit,
 )
+
+
+class SystemKnowledgeRepository:
+    """Repository for the active SQLAlchemy system-knowledge persistence path."""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get(self, record_id):
+        return self.db.get(SystemKnowledge, record_id)
+
+    def get_current_by_key(self, key: str):
+        return self.db.query(SystemKnowledge).filter(
+            SystemKnowledge.key == key,
+            SystemKnowledge.is_active.is_(True),
+            SystemKnowledge.deleted_at.is_(None),
+        ).order_by(desc(SystemKnowledge.version)).first()
+
+    def get_versions(self, key: str):
+        return self.db.query(SystemKnowledge).filter(
+            SystemKnowledge.key == key,
+        ).order_by(desc(SystemKnowledge.version)).all()
+
+    def list_active_public(self):
+        return self.db.query(SystemKnowledge).filter(
+            SystemKnowledge.is_active.is_(True),
+            SystemKnowledge.visibility == "public",
+            SystemKnowledge.deleted_at.is_(None),
+        ).all()
+
+    def list(self, *, category=None, visibility=None, active_only=False, limit=100, offset=0):
+        query = self.db.query(SystemKnowledge)
+        if category:
+            query = query.filter(SystemKnowledge.category == category)
+        if visibility:
+            query = query.filter(SystemKnowledge.visibility == visibility)
+        if active_only:
+            query = query.filter(SystemKnowledge.is_active.is_(True), SystemKnowledge.deleted_at.is_(None))
+        return query.order_by(SystemKnowledge.key.asc(), desc(SystemKnowledge.version)).offset(offset).limit(limit).all()
+
+    def add(self, record: SystemKnowledge) -> SystemKnowledge:
+        self.db.add(record)
+        self.db.flush()
+        return record
+
+    def add_audit(self, audit: SystemKnowledgeAudit) -> SystemKnowledgeAudit:
+        self.db.add(audit)
+        self.db.flush()
+        return audit
+
+    def audit_history(self, record_id):
+        return self.db.query(SystemKnowledgeAudit).filter(
+            SystemKnowledgeAudit.record_id == record_id,
+        ).order_by(desc(SystemKnowledgeAudit.created_at)).all()
 
 
 class EventRepository:
@@ -32,7 +87,7 @@ class EventRepository:
             risk_score=kwargs.get("risk_score"),
             factors=kwargs.get("factors"),
             zone=kwargs.get("zone"),
-            metadata=kwargs.get("metadata"),
+            event_metadata=kwargs.get("metadata"),
         )
         self.db.add(event)
         self.db.flush()

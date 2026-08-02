@@ -3,15 +3,18 @@ import type {
   eventSchema,
   eventsResponseSchema,
   browserFrameResponseSchema,
+  cameraHeatmapCellSchema,
   cameraConnectionStatusSchema,
   cameraConnectionTestResponseSchema,
   cameraDetectionsResponseSchema,
   cameraEventsResponseSchema,
+  cameraOverlayResponseSchema,
   cameraRuntimeStatusSchema,
   cameraSchema,
   camerasResponseSchema,
   cameraSourceTypeSchema,
   cameraWebSocketMessageSchema,
+  cameraZoneOverlaySchema,
   semanticQueryResponseSchema,
   semanticResultsResponseSchema,
   statisticsResponseSchema,
@@ -31,6 +34,9 @@ export type CamerasResponse = z.infer<typeof camerasResponseSchema>;
 export type CameraConnectionTestResponse = z.infer<typeof cameraConnectionTestResponseSchema>;
 export type CameraEventsResponse = z.infer<typeof cameraEventsResponseSchema>;
 export type CameraDetectionsResponse = z.infer<typeof cameraDetectionsResponseSchema>;
+export type CameraZoneOverlay = z.infer<typeof cameraZoneOverlaySchema>;
+export type CameraHeatmapCell = z.infer<typeof cameraHeatmapCellSchema>;
+export type CameraOverlayResponse = z.infer<typeof cameraOverlayResponseSchema>;
 export type BrowserFrameResponse = z.infer<typeof browserFrameResponseSchema>;
 export type CameraWebSocketMessage = z.infer<typeof cameraWebSocketMessageSchema>;
 export type StatusSystem = z.infer<typeof statusSystemSchema>;

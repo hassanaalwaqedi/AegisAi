@@ -50,7 +50,6 @@ export default function AnalyticsPage() {
               <AnalyticsChart
                 title="Detections over time"
                 description="Requires detections_over_time from /statistics"
-                unavailable="Analytics data not available from backend: detections_over_time was not returned by /statistics."
                 data={detectionsOverTimeData(statistics)}
                 kind="line"
                 xKey="time"
@@ -59,7 +58,6 @@ export default function AnalyticsPage() {
               <AnalyticsChart
                 title="Alerts by severity"
                 description="Requires alerts_by_severity from /statistics"
-                unavailable="Analytics data not available from backend: alerts_by_severity was not returned by /statistics."
                 data={alertsBySeverityData(statistics)}
                 kind="bar"
                 xKey="severity"
@@ -68,7 +66,6 @@ export default function AnalyticsPage() {
               <AnalyticsChart
                 title="Risk level distribution"
                 description="Uses risk.distribution from /statistics"
-                unavailable="Analytics data not available from backend: risk.distribution was not returned by /statistics."
                 data={riskDistributionData(statistics)}
                 kind="pie"
                 xKey="level"
@@ -77,7 +74,6 @@ export default function AnalyticsPage() {
               <AnalyticsChart
                 title="Crowd density trend"
                 description="Requires crowd_density_trend or crowd.density_trend from /statistics"
-                unavailable="Analytics data not available from backend: crowd density trend fields were not returned by /statistics."
                 data={crowdDensityTrendData(statistics)}
                 kind="line"
                 xKey="time"

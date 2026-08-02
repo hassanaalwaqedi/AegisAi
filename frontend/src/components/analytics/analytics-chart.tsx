@@ -15,23 +15,33 @@ import {
   YAxis
 } from "recharts";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
-import { CapabilityGap } from "@/components/layout/states";
 
 const COLORS = ["#2dd4bf", "#f6c453", "#ff4f64", "#9a8cff", "#38d6ff"];
 
 type AnalyticsChartProps = {
   title: string;
   description: string;
-  unavailable: string;
   data: Array<Record<string, string | number>>;
   kind: "bar" | "line" | "pie";
   xKey: string;
   yKey: string;
 };
 
-export function AnalyticsChart({ title, description, unavailable, data, kind, xKey, yKey }: AnalyticsChartProps) {
+export function AnalyticsChart({ title, description, data, kind, xKey, yKey }: AnalyticsChartProps) {
   if (data.length === 0) {
-    return <CapabilityGap title={`${title} unavailable`} description={unavailable} />;
+    return (
+      <Card>
+        <CardHeader>
+          <div>
+            <CardTitle>{title}</CardTitle>
+            <p className="mt-1 text-sm text-slate-500">No data returned by backend.</p>
+          </div>
+        </CardHeader>
+        <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-white/10 bg-black/20 text-sm text-slate-500">
+          Waiting for live statistics
+        </div>
+      </Card>
+    );
   }
 
   return (

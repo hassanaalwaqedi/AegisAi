@@ -22,6 +22,8 @@ from aegis.api.routes.cameras import router as cameras_router
 from aegis.api.routes.detections import router as detections_router
 from aegis.api.routes.alerts import router as alerts_router
 from aegis.api.routes.recordings import router as recordings_router
+from aegis.api.routes.health import router as health_router
+from aegis.api.routes.metrics import router as metrics_router
 
 __all__ = [
     "status_router",
@@ -38,5 +40,6 @@ __all__ = [
     "detections_router",
     "alerts_router",
     "recordings_router",
+    "health_router",
+    "metrics_router",
 ]
-

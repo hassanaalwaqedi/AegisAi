@@ -16,9 +16,9 @@ export default function SemanticPage() {
       <section className="section-shell">
         <PageHeader
           eyebrow="Semantic intelligence"
-          title="Natural Language Risk Query"
-          description="Submit operator prompts to the backend semantic layer and review only the real results returned by GET /semantic/results."
-          badge="Semantic API"
+          title="Live Evidence Search"
+          description="Search real tracks, events, associations, and crowd metrics using natural language. The system returns only evidence the backend has verified."
+          badge="Live data"
         />
 
         <ApiStatusBanner endpoints={[{ name: "/semantic/results", query: resultsQuery }]} />

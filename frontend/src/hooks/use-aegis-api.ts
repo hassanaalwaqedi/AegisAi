@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { aegisApiClient } from "@/lib/api-client";
+import { aegisApiClient, type CameraUpdateInput } from "@/lib/api-client";
 
 export const queryKeys = {
   status: ["status"] as const,
@@ -11,7 +11,8 @@ export const queryKeys = {
   semanticResults: ["semantic-results"] as const,
   cameras: ["cameras"] as const,
   cameraEvents: (cameraId: string) => ["camera-events", cameraId] as const,
-  cameraDetections: (cameraId: string) => ["camera-detections", cameraId] as const
+  cameraDetections: (cameraId: string) => ["camera-detections", cameraId] as const,
+  cameraOverlays: (cameraId: string) => ["camera-overlays", cameraId] as const
 };
 
 export function useStatusQuery() {
@@ -31,7 +32,8 @@ export function useEventsQuery() {
 export function useTracksQuery() {
   return useQuery({
     queryKey: queryKeys.tracks,
-    queryFn: () => aegisApiClient.getTracks()
+    queryFn: () => aegisApiClient.getTracks(),
+    refetchInterval: 3000
   });
 }
 
@@ -45,7 +47,8 @@ export function useStatisticsQuery() {
 export function useSemanticResultsQuery() {
   return useQuery({
     queryKey: queryKeys.semanticResults,
-    queryFn: () => aegisApiClient.getSemanticResults()
+    queryFn: () => aegisApiClient.getSemanticResults(),
+    refetchInterval: 5000
   });
 }
 
@@ -90,6 +93,15 @@ export function useCameraDetectionsQuery(cameraId?: string) {
   });
 }
 
+export function useCameraOverlaysQuery(cameraId?: string) {
+  return useQuery({
+    queryKey: queryKeys.cameraOverlays(cameraId ?? ""),
+    queryFn: () => aegisApiClient.getCameraOverlays(cameraId ?? ""),
+    enabled: Boolean(cameraId),
+    refetchInterval: 3000
+  });
+}
+
 export function useCreateCameraMutation() {
   const queryClient = useQueryClient();
 
@@ -98,6 +110,18 @@ export function useCreateCameraMutation() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.cameras });
       void queryClient.invalidateQueries({ queryKey: queryKeys.status });
+    }
+  });
+}
+
+export function useUpdateCameraMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ cameraId, input }: { cameraId: string; input: CameraUpdateInput }) => aegisApiClient.updateCamera(cameraId, input),
+    onSuccess: (_, variables) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.cameras });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.cameraOverlays(variables.cameraId) });
     }
   });
 }

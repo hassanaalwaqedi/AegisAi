@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Activity, ShieldCheck } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 import { Navigation } from "@/components/layout/navigation";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -18,11 +18,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </Link>
 
           <Navigation />
-
-          <div className="hidden items-center gap-2 text-xs text-slate-400 xl:flex">
-            <Activity className="h-4 w-4 text-signal-teal" aria-hidden />
-            Video - Detection - Tracking - Behavior - Risk - Response
-          </div>
         </div>
       </header>
       <main>{children}</main>

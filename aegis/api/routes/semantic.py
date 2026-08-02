@@ -11,7 +11,7 @@ Phase 5: Semantic Intelligence Layer
 """
 
 import logging
-from typing import Optional, List
+from typing import Optional, List, Literal, Union
 from pydantic import BaseModel, Field
 
 from fastapi import APIRouter, HTTPException, Query
@@ -55,17 +55,26 @@ class SemanticQueryResponse(BaseModel):
     prompt_id: str
     message: str
     active_prompts: int
+    matches: int = 0
+    execution_ms: float = 0.0
 
 
 class SemanticResultItem(BaseModel):
     """Single semantic detection result."""
-    track_id: int
+    track_id: Union[int, str]
+    source: Literal["track", "event", "statistics"] = "track"
     base_class: str
     semantic_label: Optional[str]
     semantic_confidence: Optional[float]
     risk_score: float
     matched_phrase: Optional[str]
     behaviors: List[str]
+    camera_id: Optional[str] = None
+    zone: Optional[str] = None
+    confidence: Optional[float] = None
+    verification_status: Optional[str] = None
+    timestamp: Optional[str] = None
+    evidence: List[str] = Field(default_factory=list)
 
 
 class SemanticResultsResponse(BaseModel):
@@ -73,6 +82,12 @@ class SemanticResultsResponse(BaseModel):
     total_tracks: int
     semantic_matches: int
     results: List[SemanticResultItem]
+    mode: Literal["live_evidence", "disabled"] = "live_evidence"
+    query: Optional[str] = None
+    evaluated_tracks: int = 0
+    evaluated_events: int = 0
+    execution_ms: float = 0.0
+    updated_at: Optional[str] = None
 
 
 class PromptItem(BaseModel):
@@ -116,14 +131,17 @@ async def submit_semantic_query(request: SemanticQueryRequest):
     """
     state = get_state()
     
-    # Check if semantic layer is available
-    if not hasattr(state, 'semantic_prompt_manager') or state.semantic_prompt_manager is None:
+    if not hasattr(state, "semantic_query_engine") or state.semantic_query_engine is None:
         raise HTTPException(
             status_code=503,
-            detail="Semantic layer not available. Enable with --enable-semantic"
+            detail="Semantic query engine is not available."
         )
     
     try:
+        previous_prompt_id = getattr(state, "active_semantic_prompt_id", None)
+        if previous_prompt_id:
+            state.semantic_prompt_manager.remove_prompt(previous_prompt_id)
+
         prompt_id = state.semantic_prompt_manager.add_prompt(
             text=request.prompt,
             priority=request.priority,
@@ -132,6 +150,16 @@ async def submit_semantic_query(request: SemanticQueryRequest):
         
         # Set as active query
         state.active_semantic_query = request.prompt
+        state.active_semantic_prompt_id = prompt_id
+
+        execution = state.semantic_query_engine.search(
+            prompt=request.prompt,
+            tracks=state.get_tracks(),
+            events=state.get_events(limit=100),
+            statistics=state.get_statistics(),
+        )
+        state.semantic_triggers += 1
+        state.semantic_matches += len(execution.results)
         
         active_count = len(state.semantic_prompt_manager.get_active_prompts())
         
@@ -140,8 +168,10 @@ async def submit_semantic_query(request: SemanticQueryRequest):
         return SemanticQueryResponse(
             success=True,
             prompt_id=prompt_id,
-            message=f"Query submitted. Will analyze tracks matching: '{request.prompt}'",
-            active_prompts=active_count
+            message=f"Query searched live evidence and found {len(execution.results)} match(es).",
+            active_prompts=active_count,
+            matches=len(execution.results),
+            execution_ms=execution.execution_ms,
         )
         
     except Exception as e:
@@ -160,6 +190,9 @@ async def remove_semantic_query(prompt_id: str):
     success = state.semantic_prompt_manager.remove_prompt(prompt_id)
     
     if success:
+        if getattr(state, "active_semantic_prompt_id", None) == prompt_id:
+            state.active_semantic_prompt_id = None
+            state.active_semantic_query = None
         return {"success": True, "message": f"Prompt {prompt_id} removed"}
     else:
         raise HTTPException(status_code=404, detail=f"Prompt {prompt_id} not found")
@@ -201,34 +234,37 @@ async def get_semantic_results(limit: int = Query(default=50, le=100)):
     """
     state = get_state()
     
-    if not hasattr(state, 'unified_intelligence') or state.unified_intelligence is None:
+    engine = getattr(state, "semantic_query_engine", None)
+    prompt = getattr(state, "active_semantic_query", None)
+    if engine is None:
         return SemanticResultsResponse(
             total_tracks=0,
             semantic_matches=0,
-            results=[]
+            results=[],
+            mode="disabled",
         )
-    
-    intel = state.unified_intelligence[:limit]
-    
-    results = [
-        SemanticResultItem(
-            track_id=obj.track_id,
-            base_class=obj.base_class,
-            semantic_label=obj.semantic_label,
-            semantic_confidence=obj.semantic_confidence,
-            risk_score=obj.risk_score,
-            matched_phrase=obj.matched_phrase,
-            behaviors=obj.behaviors
-        )
-        for obj in intel
-    ]
-    
-    semantic_count = sum(1 for r in results if r.semantic_label is not None)
-    
+
+    if not prompt:
+        return SemanticResultsResponse(total_tracks=0, semantic_matches=0, results=[])
+
+    execution = engine.search(
+        prompt=prompt,
+        tracks=state.get_tracks(),
+        events=state.get_events(limit=100),
+        statistics=state.get_statistics(),
+        limit=limit,
+    )
+    results = [SemanticResultItem(**result) for result in execution.results]
+
     return SemanticResultsResponse(
         total_tracks=len(results),
-        semantic_matches=semantic_count,
-        results=results
+        semantic_matches=len(results),
+        results=results,
+        query=execution.prompt,
+        evaluated_tracks=execution.evaluated_tracks,
+        evaluated_events=execution.evaluated_events,
+        execution_ms=execution.execution_ms,
+        updated_at=execution.updated_at,
     )
 
 
@@ -237,7 +273,7 @@ async def get_semantic_stats():
     """Get semantic layer statistics."""
     state = get_state()
     
-    enabled = hasattr(state, 'semantic_prompt_manager') and state.semantic_prompt_manager is not None
+    enabled = hasattr(state, "semantic_query_engine") and state.semantic_query_engine is not None
     
     if not enabled:
         return SemanticStatsResponse(
@@ -247,7 +283,7 @@ async def get_semantic_stats():
             cache_stats={}
         )
     
-    cache_stats = state.semantic_prompt_manager.get_cache_stats() if enabled else {}
+    cache_stats = state.semantic_prompt_manager.get_cache_stats() if getattr(state, "semantic_prompt_manager", None) else {}
     
     return SemanticStatsResponse(
         enabled=True,

@@ -1,0 +1,73 @@
+Viewing Logs (The most important for debugging!)
+When something fails (like a generation job), you always want to check the logs.
+
+View worker logs (GPU/Generation tasks):
+
+bash
+docker-compose logs -f worker
+(The -f flag "follows" the logs live. Press Ctrl+C to exit).
+
+View API logs (Web server & API requests):
+
+bash
+docker-compose logs -f api
+View logs for all services at once:
+
+bash
+docker-compose logs -f
+View only the last 100 lines of a log:
+
+bash
+docker-compose logs --tail=100 worker
+2. Applying Configuration Changes
+If you change .env or edit the Python code, you need to tell Docker to apply those changes.
+
+Apply .env changes (Forces containers to recreate with new environment variables):
+
+bash
+docker-compose up -d --force-recreate
+Apply Code changes (Rebuilds the Docker images and restarts containers):
+
+bash
+docker-compose up -d --build
+Just restart a container (If it's stuck or you just want to reboot it without changing configurations):
+
+bash
+docker-compose restart api worker
+3. Managing the System State
+Start everything in the background:
+
+bash
+docker-compose up -d
+Stop everything safely:
+
+bash
+docker-compose down
+Stop everything AND wipe the database / clear Redis queues (Warning: This deletes all your jobs and data!):
+
+bash
+docker-compose down -v
+4. Running Commands Inside the Containers
+Sometimes you need to run a manual script or check a file from the perspective of the application.
+
+Open a bash shell inside the API container:
+
+bash
+docker exec -it alphanord-api bash
+Check what's inside the storage folder (where videos are saved):
+
+bash
+docker exec -it alphanord-worker ls -la /home/alphanord/app/storage/videos
+
+
+
+get the content worker  :
+
+bahs 
+
+Get-Content worker_out.log -Tail 200
+
+
+cd C:\Users\Hassan\AegisAi-1
+
+python -m uvicorn aegis.api.app:app --host 0.0.0.0 --port 8080

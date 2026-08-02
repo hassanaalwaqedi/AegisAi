@@ -9,18 +9,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
 from aegis.api.security import verify_api_key
-from aegis.video.camera_sources import (
+from aegis.camera import (
     CameraConfig,
     CameraConnectionStatus,
     CameraSourceFactory,
@@ -39,7 +40,18 @@ UPLOAD_DIR = Path("data/uploads")
 UPLOAD_INDEX_PATH = UPLOAD_DIR / "videos.json"
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 
+
 _camera_manager: Optional[MultiCameraPipelineManager] = None
+
+
+def camera_preview_interval_seconds() -> float:
+    """Bound preview delivery without changing the detection pipeline."""
+    raw_value = os.getenv("AEGIS_CAMERA_STREAM_FPS", "5")
+    try:
+        frames_per_second = float(raw_value)
+    except (TypeError, ValueError):
+        frames_per_second = 5.0
+    return 1.0 / max(1.0, min(frames_per_second, 15.0))
 
 
 def get_camera_manager() -> MultiCameraPipelineManager:
@@ -109,6 +121,38 @@ class BrowserFrameRequest(BaseModel):
     frame: str = Field(..., min_length=32)
 
 
+class CameraZoneOverlay(BaseModel):
+    """A persisted camera zone in source-frame pixel coordinates."""
+
+    zone_id: str
+    name: str
+    type: str
+    bounds: List[float]
+    description: str = ""
+    active: bool = True
+
+
+class CameraHeatmapCell(BaseModel):
+    """An occupancy cell calculated from actual recent track positions."""
+
+    x: float
+    y: float
+    width: float
+    height: float
+    count: int
+    intensity: float
+
+
+class CameraOverlayResponse(BaseModel):
+    camera_id: str
+    frame_width: Optional[int] = None
+    frame_height: Optional[int] = None
+    zones: List[CameraZoneOverlay]
+    heatmap: List[CameraHeatmapCell]
+    heatmap_samples: int
+    generated_at: str
+
+
 class ProcessVideoRequest(BaseModel):
     camera_id: Optional[str] = Field(default=None, min_length=1, max_length=80)
 
@@ -145,11 +189,126 @@ def _get_video_record(video_id: str) -> Dict[str, Any]:
     return record
 
 
+def _positive_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalise_camera_zones(raw_zones: Any) -> List[CameraZoneOverlay]:
+    """Validate persisted metadata before returning it to an overlay client."""
+    if not isinstance(raw_zones, list):
+        return []
+
+    zones: List[CameraZoneOverlay] = []
+    for index, raw_zone in enumerate(raw_zones):
+        if not isinstance(raw_zone, dict):
+            continue
+        raw_bounds = raw_zone.get("bounds")
+        if not isinstance(raw_bounds, list) or len(raw_bounds) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = [float(value) for value in raw_bounds]
+        except (TypeError, ValueError):
+            continue
+        if x2 <= x1 or y2 <= y1:
+            continue
+        zones.append(
+            CameraZoneOverlay(
+                zone_id=str(raw_zone.get("id") or raw_zone.get("zone_id") or f"zone-{index + 1}"),
+                name=str(raw_zone.get("name") or f"Zone {index + 1}"),
+                type=str(raw_zone.get("type") or "RESTRICTED").upper(),
+                bounds=[x1, y1, x2, y2],
+                description=str(raw_zone.get("description") or ""),
+                active=bool(raw_zone.get("active", True)),
+            )
+        )
+    return zones
+
+
+def _build_camera_heatmap(
+    detections: List[Dict[str, Any]],
+    frame_width: int,
+    frame_height: int,
+) -> List[CameraHeatmapCell]:
+    """Aggregate recent track centres into a compact source-frame grid."""
+    if frame_width <= 0 or frame_height <= 0:
+        return []
+
+    columns = min(12, max(4, round(frame_width / 80)))
+    rows = min(9, max(3, round(frame_height / 80)))
+    cell_width = frame_width / columns
+    cell_height = frame_height / rows
+    counts: Dict[tuple[int, int], int] = {}
+
+    for detection in detections:
+        bbox = detection.get("bbox")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = [float(value) for value in bbox]
+        except (TypeError, ValueError):
+            continue
+        center_x = min(max((x1 + x2) / 2, 0.0), frame_width - 0.001)
+        center_y = min(max((y1 + y2) / 2, 0.0), frame_height - 0.001)
+        column = min(int(center_x / cell_width), columns - 1)
+        row = min(int(center_y / cell_height), rows - 1)
+        counts[(column, row)] = counts.get((column, row), 0) + 1
+
+    if not counts:
+        return []
+
+    peak = max(counts.values())
+    return [
+        CameraHeatmapCell(
+            x=column * cell_width,
+            y=row * cell_height,
+            width=cell_width,
+            height=cell_height,
+            count=count,
+            intensity=round(count / peak, 3),
+        )
+        for (column, row), count in sorted(counts.items())
+    ]
+
+
 @cameras_router.get("")
 async def list_cameras(_: bool = Depends(verify_api_key)):
     manager = get_camera_manager()
     cameras = manager.list_cameras()
     return {"count": len(cameras), "cameras": cameras}
+
+
+@cameras_router.get("/{camera_id}/overlays", response_model=CameraOverlayResponse)
+async def get_camera_overlays(
+    camera_id: str,
+    history_limit: int = Query(default=600, ge=1, le=1000),
+    _: bool = Depends(verify_api_key),
+):
+    """Return configured zones and heatmap cells calculated from real tracks."""
+    manager = get_camera_manager()
+    camera = manager.get_camera(camera_id)
+    if camera is None:
+        raise _http_error(404, f"Camera {camera_id} was not found.")
+
+    runtime = camera.get("runtime") or {}
+    width = _positive_int(runtime.get("width"))
+    height = _positive_int(runtime.get("height"))
+    metadata = camera.get("metadata") or {}
+    zones = _normalise_camera_zones(metadata.get("zones") or metadata.get("restricted_zones") or [])
+    detections = manager.get_camera_detections(camera_id, limit=history_limit)
+    heatmap = _build_camera_heatmap(detections, width, height)
+
+    return CameraOverlayResponse(
+        camera_id=camera_id,
+        frame_width=width or None,
+        frame_height=height or None,
+        zones=zones,
+        heatmap=heatmap,
+        heatmap_samples=sum(cell.count for cell in heatmap),
+        generated_at=datetime.utcnow().isoformat(),
+    )
 
 
 @cameras_router.post("")
@@ -295,6 +454,7 @@ async def get_camera_detections(
 async def camera_frames_websocket(websocket: WebSocket, camera_id: str):
     await websocket.accept()
     manager = get_camera_manager()
+    preview_interval = camera_preview_interval_seconds()
     try:
         while True:
             camera = manager.get_camera(camera_id)
@@ -325,7 +485,7 @@ async def camera_frames_websocket(websocket: WebSocket, camera_id: str):
                     "error_message": camera["runtime"].get("error_message"),
                     "timestamp": datetime.utcnow().isoformat(),
                 })
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(preview_interval)
     except WebSocketDisconnect:
         return
 
