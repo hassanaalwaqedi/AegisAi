@@ -1,4 +1,4 @@
-import type { Camera, RiskEvent } from "@/types";
+import type { Camera, OperationalAlert, RiskEvent } from "@/types";
 
 export type ActivityFilter = "all" | "review" | "high" | "resolved" | "camera";
 export type ActivityStatus = "high" | "attention" | "monitoring" | "resolved" | "offline" | "delayed" | "unavailable";
@@ -20,10 +20,12 @@ const resolvedValues = new Set(["resolved", "closed", "acknowledged"]);
 const vehicleClasses = new Set(["vehicle", "car", "bus", "truck", "motorcycle", "bicycle"]);
 
 export function cameraDisplayName(camera?: Camera, cameraId?: string) {
-  if (camera?.name?.trim()) return camera.name.trim();
+  const name = camera?.name?.trim();
+  if (name && !["http stream", "rtsp stream", "local device", "browser webcam", "uploaded video"].includes(name.toLowerCase())) return name;
   const reference = camera?.camera_id ?? cameraId;
   if (!reference) return "Camera unavailable";
   const cleanReference = reference
+    .replace(/^(?:http|rtsp)[-_]?stream[-_]?/i, "")
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .replace(/[-_]+/g, " ")
     .replace(/\s+/g, " ")
@@ -45,6 +47,34 @@ export function cameraCondition(camera?: Camera): "live" | "offline" | "delayed"
 export function eventTimestamp(event?: RiskEvent) {
   if (!event?.timestamp) return 0;
   return typeof event.timestamp === "number" ? event.timestamp * 1_000 : Date.parse(event.timestamp) || 0;
+}
+
+/** Convert a durable alert into the existing evidence-view event shape.
+ *
+ * The dashboard and activity workspace retain their visual presentation, but
+ * review work now begins with persisted alerts instead of inferred per-frame
+ * risk observations.  The event ID remains the evidence ID for deep links.
+ */
+export function operationalAlertToEvent(alert: OperationalAlert): RiskEvent {
+  return {
+    id: alert.alert_id,
+    event_id: alert.event_id,
+    alert_id: alert.alert_id,
+    incident_id: alert.incident_id ?? undefined,
+    timestamp: alert.timestamp ?? undefined,
+    risk_level: alert.risk_level.toUpperCase() as RiskEvent["risk_level"],
+    risk_score: alert.risk_score ?? undefined,
+    track_id: alert.track_id ?? undefined,
+    camera_id: alert.camera_id ?? undefined,
+    zone: alert.zone,
+    description: alert.message,
+    explanation: alert.message,
+    reason: alert.message,
+    factors: alert.factors,
+    snapshot_path: alert.snapshot_path ?? undefined,
+    snapshot_status: alert.evidence_status,
+    verification_status: alert.acknowledged ? "acknowledged" : "confirmed",
+  };
 }
 
 function eventStatus(event: RiskEvent): ActivityStatus {
@@ -87,10 +117,14 @@ function chooseItem(current: ActivityAlertItem | undefined, next: ActivityAlertI
 }
 
 /** Build concise review work from returned event records and runtime camera state. */
-export function buildActivityAlertItems(cameras: Camera[], events: RiskEvent[]) {
+export function buildActivityAlertItems(cameras: Camera[], events: RiskEvent[], alerts?: OperationalAlert[]) {
   const cameraById = new Map(cameras.map((camera) => [camera.camera_id, camera]));
   const relatedByCamera = new Map<string, RiskEvent[]>();
-  for (const event of events) {
+  // When the durable alert endpoint has answered, it is the only source for
+  // operator review status.  Runtime events remain linked as timeline
+  // evidence but cannot create a fake review item on their own.
+  const reviewEvents = alerts === undefined ? events : alerts.map(operationalAlertToEvent);
+  for (const event of reviewEvents) {
     if (!event.camera_id) continue;
     relatedByCamera.set(event.camera_id, [...(relatedByCamera.get(event.camera_id) ?? []), event]);
   }
@@ -186,4 +220,5 @@ export const activityAlertsInternals = {
   eventTimestamp,
   filterActivityAlertItems,
   isNewActivity,
+  operationalAlertToEvent,
 };

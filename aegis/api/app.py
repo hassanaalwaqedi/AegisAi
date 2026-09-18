@@ -47,15 +47,21 @@ from aegis.api.routes import (
 )
 from aegis.api.routes.intelligence import router as intelligence_router
 from aegis.api.routes.intelligence_context import router as intelligence_context_router
-from aegis.api.routes.intelligence_live import router as intelligence_live_router, ws_router as intelligence_live_ws_router
+from aegis.api.routes.intelligence_live import (
+    router as intelligence_live_router,
+    ws_router as intelligence_live_ws_router,
+    intelligence_live_socket,
+)
 from aegis.api.routes.system_knowledge import router as system_knowledge_router, admin_router as system_knowledge_admin_router
 from aegis.api.security import (
     limiter,
+    GlobalRateLimitMiddleware,
     rate_limit_exceeded_handler,
     verify_api_key,
     get_allowed_origins,
     get_rate_limit,
     is_debug_mode,
+    api_authentication_readiness,
 )
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -129,6 +135,10 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
     """
     config = config or APIConfig()
 
+    auth_configured, auth_message = api_authentication_readiness()
+    if not auth_configured:
+        logger.critical("Aegis API starts fail-closed: %s", auth_message)
+
     app = FastAPI(
         title="AegisAI API",
         description="AI Security Operating System - REST API",
@@ -141,6 +151,7 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
     # Add rate limiter
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+    app.add_middleware(GlobalRateLimitMiddleware)
 
     # Add CORS middleware with restricted origins (include frontend and local network)
     cors_origins = list(config.cors_origins) + [
@@ -169,6 +180,11 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
     app.include_router(intelligence_context_router)
     app.include_router(intelligence_live_router)
     app.include_router(intelligence_live_ws_router)
+    # Register the Live socket directly as well. Some recent FastAPI router
+    # releases defer included router expansion for HTTP routes but omit nested
+    # WebSocket routes at runtime, causing the browser handshake to receive a
+    # misleading 404 even though the session API is available.
+    app.add_api_websocket_route("/ws/intelligence/live/{session_id}", intelligence_live_socket)
     app.include_router(semantic_router, dependencies=[Depends(verify_api_key)])
     app.include_router(system_knowledge_router)
     app.include_router(system_knowledge_admin_router)
@@ -219,7 +235,7 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
     except ImportError:
         logger.warning("AI orchestrator routes not available")
 
-    # Include WebSocket router (no API key for WS, handled differently)
+    # WebSocket connections authenticate before the server accepts an upgrade.
     try:
         from aegis.api.websocket import ws_router
         app.include_router(ws_router)
@@ -329,6 +345,16 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
             )
         except Exception as exc:
             logger.warning("Pipeline initialization deferred: %s", exc)
+
+    @app.on_event("startup")
+    async def _startup_evidence_index():
+        from aegis.semantic.evidence_search import evidence_search
+        evidence_search.start()
+
+    @app.on_event("shutdown")
+    async def _shutdown_evidence_index():
+        from aegis.semantic.evidence_search import evidence_search
+        evidence_search.stop()
 
     @app.on_event("shutdown")
     async def _shutdown_pipeline():

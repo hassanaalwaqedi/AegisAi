@@ -14,6 +14,33 @@ export const appConfig = {
   requestTimeoutMs: 10000
 };
 
+type WebSocketTokenResponse = {
+  token?: unknown;
+  protocol?: unknown;
+};
+
+/**
+ * Obtain an ephemeral backend-issued WebSocket credential. The browser never
+ * receives the long-lived AEGIS_API_KEY; the Next server proxy performs that
+ * authenticated exchange.
+ */
+export async function createAuthenticatedWebSocket(url: string): Promise<WebSocket> {
+  const response = await fetch(`${appConfig.apiUrl}/ws/token`, {
+    method: "POST",
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    throw new Error("WebSocket authentication is unavailable.");
+  }
+
+  const payload = (await response.json()) as WebSocketTokenResponse;
+  if (typeof payload.token !== "string" || typeof payload.protocol !== "string") {
+    throw new Error("WebSocket authentication response is invalid.");
+  }
+
+  return new WebSocket(url, [payload.protocol, payload.token]);
+}
+
 export function resolveWebSocketUrl() {
   if (appConfig.wsUrl) return appConfig.wsUrl;
 

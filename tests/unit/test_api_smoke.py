@@ -34,7 +34,8 @@ from fastapi.testclient import TestClient
 def client():
     """Create a test client for the AegisAI API."""
     app = create_app()
-    return TestClient(app)
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 @pytest.fixture(scope="module")
@@ -156,15 +157,21 @@ class TestModeEndpoint:
 class TestWebSocket:
     """Test WebSocket connectivity."""
 
-    def test_ws_client_count(self, client):
+    def test_ws_client_count(self, client, auth_headers):
         """GET /ws/clients should return connection count."""
-        resp = client.get("/ws/clients")
+        resp = client.get("/ws/clients", headers=auth_headers)
         assert resp.status_code == 200
         assert "count" in resp.json()
 
-    def test_ws_connects(self, client):
-        """WebSocket should accept connections and send update."""
-        with client.websocket_connect("/ws") as ws:
+    def test_ws_connects(self, client, auth_headers):
+        """WebSocket should require and accept a short-lived API credential."""
+        token_response = client.post("/ws/token", headers=auth_headers)
+        assert token_response.status_code == 200
+        credential = token_response.json()
+        with client.websocket_connect(
+            "/ws",
+            subprotocols=[credential["protocol"], credential["token"]],
+        ) as ws:
             data = ws.receive_json()
-            assert data["type"] == "update"
+            assert data["type"] in {"update", "heartbeat"}
             assert "timestamp" in data

@@ -37,18 +37,21 @@ class EvidenceExplainer:
                 stable_frames = int(association.get("stable_frames") or 0)
                 person_track_id = association.get("person_track_id")
                 association_score = float(association.get("association_score") or 0.0)
+                body_region = str(association.get("body_region") or "").replace("_", " ")
                 if association_type == "near":
                     return (
-                        f"{normalized.title()} detected with {pct} confidence near Person #{person_track_id} "
-                        f"for {stable_frames} consecutive frames; association score {association_score:.2f}."
+                        f"Possible {normalized} detected with {pct} confidence near Person #{person_track_id} "
+                        f"for {stable_frames} consecutive frames; association score {association_score:.2f}"
+                        f"{f'; region {body_region}' if body_region else ''}. Operator review required."
                     )
                 if association_type in {"contained", "overlap"}:
                     return (
-                        f"{normalized.title()} detected with {pct} confidence associated with Person #{person_track_id} "
-                        f"for {stable_frames} consecutive frames; association score {association_score:.2f}."
+                        f"Possible {normalized} detected with {pct} confidence associated with Person #{person_track_id} "
+                        f"for {stable_frames} consecutive frames; association score {association_score:.2f}"
+                        f"{f'; region {body_region}' if body_region else ''}. Operator review required."
                     )
 
-            return f"{normalized.title()} detected with {pct} confidence without person association."
+            return f"Possible {normalized} detected with {pct} confidence without person association. Operator review required."
 
         if is_person:
             return "Person detected. Risk remains LOW because no confirmed threat evidence exists."

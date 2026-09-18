@@ -45,9 +45,12 @@ class PositionRecord:
     timestamp: float
     x: float
     y: float
-    bbox: Tuple[int, int, int, int]
-    class_id: int
-    class_name: str
+    # Geometry-only motion callers do not always have detector metadata.  Keep
+    # those fields optional at construction time while camera ingestion still
+    # supplies the real values whenever they are available.
+    bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)
+    class_id: int = 0
+    class_name: str = "Unknown"
 
 
 @dataclass
@@ -79,6 +82,8 @@ class MotionState:
             self.speed_smoothed = self.smoothed_speed
         if self.is_stationary is not None:
             self.is_moving = not self.is_stationary
+        else:
+            self.is_stationary = not self.is_moving
     
     @property
     def direction_degrees(self) -> float:

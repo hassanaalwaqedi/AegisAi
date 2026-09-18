@@ -28,6 +28,7 @@ from aegis.camera.sources import (
     HTTPCameraSource,
     BrowserWebcamSource,
     UploadedVideoSource,
+    UnavailableCameraSource,
 )
 from aegis.camera.factory import CameraSourceFactory
 from aegis.camera.registry import CameraRegistry
@@ -52,6 +53,7 @@ __all__ = [
     "HTTPCameraSource",
     "BrowserWebcamSource",
     "UploadedVideoSource",
+    "UnavailableCameraSource",
     "CameraSourceFactory",
     "CameraRegistry",
     "MultiCameraPipelineManager",

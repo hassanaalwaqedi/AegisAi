@@ -1,14 +1,14 @@
 import type { RiskEvent, RiskLevel, StatisticsResponse, StatusResponse, StatusSystem, Track } from "@/types";
 
-export function formatNumber(value: unknown, unavailableText = "Not returned") {
+export function formatNumber(value: unknown, unavailableText = "Unavailable") {
   return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : unavailableText;
 }
 
-export function formatDecimal(value: unknown, digits = 2, unavailableText = "Not returned") {
+export function formatDecimal(value: unknown, digits = 2, unavailableText = "Unavailable") {
   return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : unavailableText;
 }
 
-export function formatPercent(value: unknown, unavailableText = "Not returned") {
+export function formatPercent(value: unknown, unavailableText = "Unavailable") {
   return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value * 100)}%` : unavailableText;
 }
 
@@ -17,10 +17,10 @@ export function formatTimestamp(value: unknown) {
     return new Date(value * 1000).toLocaleString();
   }
 
-  if (typeof value !== "string") return "Not returned";
+  if (typeof value !== "string") return "Time unavailable";
 
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
+  if (Number.isNaN(date.getTime())) return "Time unavailable";
 
   return date.toLocaleString();
 }
@@ -52,7 +52,7 @@ export function getTrackLastSeen(track: Track) {
 }
 
 export function getTrackObjectName(track: Track) {
-  return track.class_name ?? "Not returned";
+  return track.class_name ?? "Unavailable";
 }
 
 export function getEventId(event: RiskEvent, index: number) {
@@ -64,7 +64,46 @@ export function getEventSeverity(event: RiskEvent) {
 }
 
 export function getEventObject(event: RiskEvent) {
-  return event.object_type ?? event.object_class ?? event.class_name ?? "Not returned";
+  return event.object_type ?? event.object_class ?? event.class_name ?? "Unavailable";
+}
+
+export function formatOperatorLabel(value: unknown, unavailableText = "Unavailable") {
+  if (typeof value !== "string" || !value.trim()) return unavailableText;
+
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const labels: Record<string, string> = {
+    yolo: "Visual detection",
+    base_detector: "Visual detection",
+    object_detector: "Visual detection",
+    detector: "Visual detection",
+    weapon_detector: "Weapon detection",
+    tracker: "Movement tracking",
+    risk_engine: "Risk assessment",
+    temporal_risk_model: "Risk assessment",
+    inference_pipeline: "Activity analysis",
+    system_metric: "System measurement",
+    verified_backend: "Verified event",
+    possible_weapon_person_association: "Possible weapon-person association",
+    weapon_person_association: "Possible weapon-person association",
+    weapon_near_person: "Weapon near person",
+    weapon_proximity: "Weapon nearby",
+    second_person_nearby: "Another person nearby",
+    closing_distance: "Closing distance",
+    fast_movement: "Fast movement",
+    repeated_close_contact: "Repeated close contact",
+    temporal_confirmation: "Repeated activity",
+    restricted_zone: "Restricted area activity",
+    crowd_density: "Crowd density",
+    no_person_association: "No person association"
+  };
+
+  if (labels[normalized]) return labels[normalized];
+  return normalized.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+export function formatOperatorList(values?: Array<string | null | undefined>, unavailableText = "Unavailable") {
+  const labels = values?.map((value) => formatOperatorLabel(value, "")).filter(Boolean) ?? [];
+  return labels.length ? labels.join(", ") : unavailableText;
 }
 
 export function getEventRiskScore(event: RiskEvent) {

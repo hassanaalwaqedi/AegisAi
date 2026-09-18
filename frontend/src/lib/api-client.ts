@@ -3,6 +3,8 @@ import { appConfig } from "@/lib/config";
 import { AegisClientError } from "@/lib/errors";
 import {
   browserFrameResponseSchema,
+  alertCountResponseSchema,
+  alertsResponseSchema,
   cameraOverlayResponseSchema,
   cameraConnectionTestResponseSchema,
   cameraDetectionsResponseSchema,
@@ -10,9 +12,15 @@ import {
   cameraSchema,
   camerasResponseSchema,
   eventsResponseSchema,
+  incidentsResponseSchema,
+  persistedEvidenceResponseSchema,
   semanticQueryRequestSchema,
   semanticQueryResponseSchema,
   semanticResultsResponseSchema,
+  evidenceSearchRequestSchema,
+  evidenceSearchResponseSchema,
+  evidenceSearchStatusSchema,
+  evidenceSearchDetailSchema,
   statisticsResponseSchema,
   statusResponseSchema,
   tracksResponseSchema,
@@ -35,6 +43,14 @@ type CameraCreateInput = {
   url?: string;
   device_index?: number;
   auto_start?: boolean;
+  rtsp_protocol?: "rtsp" | "rtsps";
+  rtsp_host?: string;
+  rtsp_port?: number;
+  rtsp_path?: string;
+  rtsp_username?: string;
+  rtsp_password?: string;
+  connection_test_id?: string;
+  allow_unverified_save?: boolean;
   connection_timeout?: number;
   max_retries?: number;
   metadata?: Record<string, unknown>;
@@ -106,7 +122,13 @@ class AegisApiClient {
         let detail = "";
         try {
           const json = await response.json();
-          detail = typeof json.detail === "string" ? json.detail : JSON.stringify(json.detail ?? json);
+          if (typeof json.detail === "string") {
+            detail = json.detail;
+          } else if (json.detail && typeof json.detail === "object" && typeof json.detail.message === "string") {
+            detail = json.detail.message;
+          } else {
+            detail = JSON.stringify(json.detail ?? json);
+          }
         } catch {
           detail = "";
         }
@@ -230,6 +252,26 @@ class AegisApiClient {
     return this.request("/events", eventsResponseSchema);
   }
 
+  getAlerts(activeOnly = false, limit?: number) {
+    const boundedLimit = typeof limit === "number" && Number.isFinite(limit) ? Math.max(1, Math.min(100, Math.floor(limit))) : undefined;
+    const path = activeOnly
+      ? `/alerts/active${boundedLimit ? `?limit=${boundedLimit}` : ""}`
+      : "/alerts";
+    return this.request(path, alertsResponseSchema);
+  }
+
+  getAlertCount() {
+    return this.request("/alerts/count", alertCountResponseSchema);
+  }
+
+  getPersistedEvidence() {
+    return this.request("/events/persisted", persistedEvidenceResponseSchema);
+  }
+
+  getIncidents() {
+    return this.request("/events/incidents", incidentsResponseSchema);
+  }
+
   getTracks() {
     return this.request("/tracks", tracksResponseSchema);
   }
@@ -248,6 +290,20 @@ class AegisApiClient {
 
   getSemanticResults() {
     return this.request("/semantic/results", semanticResultsResponseSchema);
+  }
+
+  searchEvidence(input: z.infer<typeof evidenceSearchRequestSchema>) {
+    return this.request("/semantic/evidence/search", evidenceSearchResponseSchema, {
+      method: "POST", body: evidenceSearchRequestSchema.parse(input), timeoutMs: 30000
+    });
+  }
+
+  getEvidenceSearchStatus() {
+    return this.request("/semantic/evidence/status", evidenceSearchStatusSchema);
+  }
+
+  getEvidenceSearchDetail(eventId: string) {
+    return this.request(`/semantic/evidence/${encodeURIComponent(eventId)}`, evidenceSearchDetailSchema);
   }
 
   getCameras() {
@@ -302,7 +358,9 @@ class AegisApiClient {
     return this.request("/cameras/test-connection", cameraConnectionTestResponseSchema, {
       method: "POST",
       body: input,
-      timeoutMs: 30000
+      // A YouTube probe may need to resolve the source and prepare a short
+      // local clip before its first frame can be decoded.
+      timeoutMs: 90000
     });
   }
 

@@ -12,15 +12,20 @@ import json
 import os
 import shutil
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
-from aegis.api.security import verify_api_key
+from aegis.api.security import (
+    WEBSOCKET_AUTH_PROTOCOL,
+    verify_api_key,
+    verify_websocket_auth,
+    websocket_subprotocol_token,
+)
 from aegis.camera import (
     CameraConfig,
     CameraConnectionStatus,
@@ -29,6 +34,12 @@ from aegis.camera import (
     MultiCameraPipelineManager,
     frame_to_data_url,
 )
+from aegis.camera.connection_tests import (
+    CameraConnectionTestResult,
+    get_connection_test_store,
+    result_for_invalid_url,
+)
+from aegis.camera.utils import build_rtsp_url
 
 
 router = APIRouter()
@@ -46,12 +57,12 @@ _camera_manager: Optional[MultiCameraPipelineManager] = None
 
 def camera_preview_interval_seconds() -> float:
     """Bound preview delivery without changing the detection pipeline."""
-    raw_value = os.getenv("AEGIS_CAMERA_STREAM_FPS", "5")
+    raw_value = os.getenv("AEGIS_CAMERA_STREAM_FPS", "30")
     try:
         frames_per_second = float(raw_value)
     except (TypeError, ValueError):
-        frames_per_second = 5.0
-    return 1.0 / max(1.0, min(frames_per_second, 15.0))
+        frames_per_second = 30.0
+    return 1.0 / max(1.0, min(frames_per_second, 30.0))
 
 
 def get_camera_manager() -> MultiCameraPipelineManager:
@@ -77,6 +88,16 @@ class CameraCreateRequest(BaseModel):
     video_id: Optional[str] = None
     upload_path: Optional[str] = None
     auto_start: bool = False
+    # Guided RTSP registration fields.  ``url`` remains available for the
+    # advanced mode and existing API clients.
+    rtsp_protocol: Optional[str] = None
+    rtsp_host: Optional[str] = Field(default=None, max_length=255)
+    rtsp_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    rtsp_path: Optional[str] = Field(default=None, max_length=1024)
+    rtsp_username: Optional[str] = Field(default=None, max_length=255)
+    rtsp_password: Optional[str] = Field(default=None, max_length=1024)
+    connection_test_id: Optional[str] = Field(default=None, max_length=128)
+    allow_unverified_save: bool = False
     connection_timeout: float = Field(default=5.0, gt=0, le=60)
     max_retries: int = Field(default=10, ge=0, le=100)
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -89,13 +110,23 @@ class CameraCreateRequest(BaseModel):
         return value
 
     def to_config(self) -> CameraConfig:
+        url = self.url
+        if self.source_type == CameraSourceType.RTSP_STREAM and self.rtsp_host:
+            url = build_rtsp_url(
+                protocol=self.rtsp_protocol or "rtsp",
+                host=self.rtsp_host,
+                port=self.rtsp_port or 554,
+                stream_path=self.rtsp_path or "",
+                username=self.rtsp_username,
+                password=self.rtsp_password,
+            )
         return CameraConfig(
             camera_id=self.camera_id,
             source_type=self.source_type,
             name=self.name,
             location=self.location,
             enabled=self.enabled,
-            url=self.url,
+            url=url,
             device_index=self.device_index,
             upload_path=self.upload_path,
             video_id=self.video_id,
@@ -164,6 +195,25 @@ def _http_error(status_code: int, message: str, detail: Optional[Any] = None) ->
     return HTTPException(status_code=status_code, detail=payload)
 
 
+def _record_camera_configuration_audit(
+    action: str,
+    camera_id: str,
+    *,
+    actor: Optional[str],
+    changed_fields: Optional[List[str]] = None,
+) -> None:
+    """Audit camera configuration changes without storing source URLs."""
+    from aegis.audit import record_audit
+
+    record_audit(
+        action,
+        actor_id=(str(actor or "").strip()[:160] or "api-key-operator"),
+        resource_type="camera",
+        resource_id=camera_id,
+        details={"changed_fields": sorted(changed_fields or [])},
+    )
+
+
 def _read_upload_index() -> Dict[str, Any]:
     if not UPLOAD_INDEX_PATH.exists():
         return {"videos": {}}
@@ -194,6 +244,63 @@ def _positive_int(value: Any) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _detection_observed_at(item: Dict[str, Any]) -> Optional[datetime]:
+    raw_value = item.get("last_seen") or item.get("timestamp")
+    if not raw_value:
+        return None
+    try:
+        observed_at = datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if observed_at.tzinfo is None:
+        return observed_at.replace(tzinfo=timezone.utc)
+    return observed_at.astimezone(timezone.utc)
+
+
+def _current_camera_detections(
+    detections: List[Dict[str, Any]],
+    *,
+    now: Optional[datetime] = None,
+    max_age_seconds: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Return one fresh detection per object from the newest processed frame."""
+    candidates = detections
+    if max_age_seconds is not None:
+        current_time = now or datetime.now(timezone.utc)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        candidates = [
+            item
+            for item in detections
+            if (observed_at := _detection_observed_at(item)) is None
+            or (current_time - observed_at).total_seconds() <= max_age_seconds
+        ]
+
+    latest_frame = max(
+        (_positive_int(item.get("frame_number") or item.get("frame_id")) for item in candidates),
+        default=0,
+    )
+    current_frame = (
+        [
+            item
+            for item in candidates
+            if _positive_int(item.get("frame_number") or item.get("frame_id")) == latest_frame
+        ]
+        if latest_frame
+        else candidates
+    )
+    unique: Dict[str, Dict[str, Any]] = {}
+    for index, item in enumerate(current_frame):
+        track_id = str(item.get("track_id") or "").strip()
+        if track_id:
+            identity = f"track:{track_id}"
+        else:
+            bbox = item.get("bbox")
+            identity = f"detection:{item.get('class_name')}:{bbox}:{index}"
+        unique[identity] = item
+    return list(unique.values())
 
 
 def _normalise_camera_zones(raw_zones: Any) -> List[CameraZoneOverlay]:
@@ -312,30 +419,62 @@ async def get_camera_overlays(
 
 
 @cameras_router.post("")
-async def create_camera(request: CameraCreateRequest, _: bool = Depends(verify_api_key)):
+async def create_camera(
+    request: CameraCreateRequest,
+    x_aegis_actor: Optional[str] = Header(default=None),
+    _: bool = Depends(verify_api_key),
+):
     manager = get_camera_manager()
     try:
-        return manager.create_camera(request.to_config(), auto_start=request.auto_start)
+        config = request.to_config()
+        verified_test = get_connection_test_store().verified_result(
+            request.connection_test_id, config
+        )
+        requires_verified_test = config.source_type == CameraSourceType.RTSP_STREAM
+        explicitly_disabled_unverified = (
+            request.allow_unverified_save and not config.enabled and not request.auto_start
+        )
+        if requires_verified_test and not verified_test and not explicitly_disabled_unverified:
+            raise _http_error(
+                409,
+                "A successful RTSP connection test is required before saving an active camera. "
+                "Choose Save as disabled to keep an unverified configuration.",
+            )
+        created = manager.create_camera(
+            config,
+            auto_start=request.auto_start,
+            connection_verified=bool(verified_test),
+            connection_test=(verified_test.to_persisted_summary() if verified_test else None),
+        )
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise _http_error(400, str(exc)) from exc
     except Exception as exc:
         raise _http_error(500, "Camera could not be created.", str(exc)) from exc
+    _record_camera_configuration_audit("camera.created", request.camera_id, actor=x_aegis_actor)
+    return created
 
 
 @cameras_router.post("/test-connection")
 async def test_camera_connection(request: CameraCreateRequest, _: bool = Depends(verify_api_key)):
     try:
-        ok, error = CameraSourceFactory().test_connection(request.to_config())
+        config = request.to_config()
+        result = CameraSourceFactory().test_connection_details(config)
     except ValueError as exc:
-        raise _http_error(400, str(exc)) from exc
+        result = result_for_invalid_url(request.url, str(exc))
     except Exception as exc:
-        raise _http_error(502, "Camera connection test failed.", str(exc)) from exc
+        result = CameraConnectionTestResult(
+            ok=False,
+            status="failed",
+            error_category="connection_failed",
+            error_message="Camera connection test could not complete.",
+        )
 
-    return {
-        "ok": ok,
-        "status": CameraConnectionStatus.ONLINE.value if ok else CameraConnectionStatus.ERROR.value,
-        "error_message": error,
-    }
+    payload = result.to_public_dict()
+    if "config" in locals():
+        payload["test_id"] = get_connection_test_store().record(config, result)
+    return payload
 
 
 @cameras_router.get("/{camera_id}")
@@ -347,23 +486,40 @@ async def get_camera(camera_id: str, _: bool = Depends(verify_api_key)):
 
 
 @cameras_router.patch("/{camera_id}")
-async def update_camera(camera_id: str, request: CameraUpdateRequest, _: bool = Depends(verify_api_key)):
+async def update_camera(
+    camera_id: str,
+    request: CameraUpdateRequest,
+    x_aegis_actor: Optional[str] = Header(default=None),
+    _: bool = Depends(verify_api_key),
+):
     changes = request.model_dump(exclude_unset=True)
     try:
-        return get_camera_manager().update_camera(camera_id, changes)
+        updated = get_camera_manager().update_camera(camera_id, changes)
     except KeyError as exc:
         raise _http_error(404, f"Camera {camera_id} was not found.") from exc
     except ValueError as exc:
         raise _http_error(400, str(exc)) from exc
     except Exception as exc:
         raise _http_error(500, "Camera could not be updated.", str(exc)) from exc
+    _record_camera_configuration_audit(
+        "camera.configuration_updated",
+        camera_id,
+        actor=x_aegis_actor,
+        changed_fields=list(changes),
+    )
+    return updated
 
 
 @cameras_router.delete("/{camera_id}")
-async def delete_camera(camera_id: str, _: bool = Depends(verify_api_key)):
+async def delete_camera(
+    camera_id: str,
+    x_aegis_actor: Optional[str] = Header(default=None),
+    _: bool = Depends(verify_api_key),
+):
     deleted = get_camera_manager().delete_camera(camera_id)
     if not deleted:
         raise _http_error(404, f"Camera {camera_id} was not found.")
+    _record_camera_configuration_audit("camera.deleted", camera_id, actor=x_aegis_actor)
     return {"message": f"Camera {camera_id} deleted."}
 
 
@@ -388,7 +544,11 @@ async def get_camera_status(camera_id: str, _: bool = Depends(verify_api_key)):
     try:
         manager = get_camera_manager()
         status = manager.get_status(camera_id)
-        detections = manager.get_camera_detections(camera_id, limit=20)
+        recent_detections = manager.get_camera_detections(camera_id, limit=200)
+        detections = _current_camera_detections(
+            recent_detections,
+            max_age_seconds=5.0,
+        )
         events = manager.get_camera_events(camera_id, limit=20)
         stats = manager.ingestion.get_stats()
         registry = manager.get_object_registry(camera_id)
@@ -403,7 +563,7 @@ async def get_camera_status(camera_id: str, _: bool = Depends(verify_api_key)):
             "object_registry": registry,
             "object_registry_count": len(registry),
             "pipeline": {
-                "recent_detections": len(detections),
+                "recent_detections": len(recent_detections),
                 "recent_events": len(events),
                 "frames_processed": stats.get("frames_processed", 0),
                 "total_detections": stats.get("total_detections", 0),
@@ -452,7 +612,11 @@ async def get_camera_detections(
 
 @router.websocket("/ws/cameras/{camera_id}/frames")
 async def camera_frames_websocket(websocket: WebSocket, camera_id: str):
-    await websocket.accept()
+    if not await verify_websocket_auth(websocket):
+        return
+    await websocket.accept(
+        subprotocol=WEBSOCKET_AUTH_PROTOCOL if websocket_subprotocol_token(websocket) else None
+    )
     manager = get_camera_manager()
     preview_interval = camera_preview_interval_seconds()
     try:
@@ -470,12 +634,17 @@ async def camera_frames_websocket(websocket: WebSocket, camera_id: str):
 
             snapshot = manager.get_snapshot(camera_id)
             if snapshot:
+                # Embed the latest detections with every frame so that the
+                # client always renders boxes that belong to the same capture
+                # moment — eliminating stale-detection misalignment.
+                detections = manager.get_camera_detections(camera_id, limit=80)
                 await websocket.send_json({
                     "type": "frame",
                     "camera_id": camera_id,
                     "status": camera["runtime"]["status"],
                     "timestamp": datetime.utcnow().isoformat(),
                     "frame": frame_to_data_url(snapshot),
+                    "detections": detections,
                 })
             else:
                 await websocket.send_json({
@@ -492,7 +661,11 @@ async def camera_frames_websocket(websocket: WebSocket, camera_id: str):
 
 @router.websocket("/ws/cameras/{camera_id}/events")
 async def camera_events_websocket(websocket: WebSocket, camera_id: str):
-    await websocket.accept()
+    if not await verify_websocket_auth(websocket):
+        return
+    await websocket.accept(
+        subprotocol=WEBSOCKET_AUTH_PROTOCOL if websocket_subprotocol_token(websocket) else None
+    )
     manager = get_camera_manager()
     sent_event_ids: set[str] = set()
     try:
@@ -515,12 +688,25 @@ async def camera_events_websocket(websocket: WebSocket, camera_id: str):
                     sent_event_ids.add(event_id)
                     new_events.append(event)
 
-            await websocket.send_json({
-                "type": "events",
-                "camera_id": camera_id,
-                "timestamp": datetime.utcnow().isoformat(),
-                "events": new_events,
-            })
+            if new_events:
+                await websocket.send_json({
+                    "type": "events",
+                    "camera_id": camera_id,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "events": new_events,
+                })
+            else:
+                # There is no event payload to publish.  Send only a
+                # heartbeat/status so an idle camera is never represented as
+                # a stream of fabricated "live events".
+                camera = manager.get_camera(camera_id) or {}
+                runtime = camera.get("runtime") or {}
+                await websocket.send_json({
+                    "type": "heartbeat",
+                    "camera_id": camera_id,
+                    "status": runtime.get("status"),
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:
         return

@@ -136,6 +136,21 @@ class MotionAnalyzer:
             is_moving=is_moving,
             distance_traveled=history.total_distance
         )
+
+    # ``analyze`` and the two helpers are retained as small compatibility
+    # aliases for the established analysis contract.  They all use the same
+    # real geometry calculation as ``analyze_track``; no synthetic motion is
+    # introduced for callers that still use the older names.
+    def analyze(self, history: TrackHistory) -> MotionState:
+        return self.analyze_track(history)
+
+    @staticmethod
+    def _compute_speed(previous: PositionRecord, current: PositionRecord) -> float:
+        return math.hypot(current.x - previous.x, current.y - previous.y)
+
+    @staticmethod
+    def _compute_direction(previous: PositionRecord, current: PositionRecord) -> float:
+        return math.atan2(-(current.y - previous.y), current.x - previous.x)
     
     def analyze_all(
         self,

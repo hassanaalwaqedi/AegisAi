@@ -21,7 +21,7 @@ import {
   WifiOff,
 } from "lucide-react";
 
-import { appConfig, resolveCameraWebSocketUrl } from "@/lib/config";
+import { appConfig, createAuthenticatedWebSocket, resolveCameraWebSocketUrl } from "@/lib/config";
 import {
   buildLiveTrackingItems,
   cameraPreviewState,
@@ -108,7 +108,7 @@ function TrackingSummaryCard({ label, value, icon: Icon, tone }: { label: string
 }
 
 export function TrackingToolbar({ filter, search, onFilterChange, onSearchChange }: { filter: TrackingFilter; search: string; onFilterChange: (filter: TrackingFilter) => void; onSearchChange: (value: string) => void }) {
-  return <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div className="flex max-w-full gap-1 overflow-x-auto rounded-lg border border-white/10 bg-white/[0.035] p-1" role="tablist" aria-label="Tracking filters">{filters.map((item) => <button key={item.id} type="button" role="tab" aria-selected={filter === item.id} onClick={() => onFilterChange(item.id)} className={cn("min-h-9 shrink-0 rounded-md px-4 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan", filter === item.id ? "border border-signal-cyan bg-signal-cyan/[0.12] text-signal-cyan" : "text-slate-300 hover:bg-white/[0.06] hover:text-white")}>{item.label}</button>)}</div><label className="relative block w-full lg:max-w-[470px]"><Search className="pointer-events-none absolute left-3 top-1/2 h-4.5 w-4.5 -translate-y-1/2 text-slate-400" aria-hidden /><input value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="Search camera or activity" aria-label="Search camera or activity" className="h-11 w-full rounded-lg border border-white/10 bg-white/[0.025] pl-10 pr-4 text-sm text-white outline-none placeholder:text-slate-500 focus:border-signal-cyan/70 focus:ring-2 focus:ring-signal-cyan/20" /></label></div>;
+  return <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div className="flex max-w-full gap-1 overflow-x-auto rounded-lg border border-white/10 bg-white/[0.035] p-1" role="tablist" aria-label="Tracking filters">{filters.map((item) => <button key={item.id} type="button" role="tab" aria-selected={filter === item.id} onClick={() => onFilterChange(item.id)} className={cn("min-h-9 shrink-0 rounded-md px-4 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan", filter === item.id ? "border border-signal-cyan bg-signal-cyan/[0.12] text-signal-cyan" : "text-slate-300 hover:bg-white/[0.06] hover:text-white")}>{item.label}</button>)}</div><label className="relative block w-full lg:max-w-[470px]"><Search className="pointer-events-none absolute start-3 top-1/2 h-4.5 w-4.5 -translate-y-1/2 text-slate-400" aria-hidden /><input value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="Search camera or activity" aria-label="Search camera or activity" className="h-11 w-full rounded-lg border border-white/10 bg-white/[0.025] ps-10 pe-4 text-sm text-white outline-none placeholder:text-slate-500 focus:border-signal-cyan/70 focus:ring-2 focus:ring-signal-cyan/20" /></label></div>;
 }
 
 export function TrackingObjectList({ items, selected, onSelect }: { items: LiveTrackingItem[]; selected: LiveTrackingItem | null; onSelect: (id: string) => void }) {
@@ -124,14 +124,14 @@ export function TrackingObjectList({ items, selected, onSelect }: { items: LiveT
 }
 
 export function TrackingObjectCard({ item, selected, onSelect }: { item: LiveTrackingItem; selected: boolean; onSelect: (id: string) => void }) {
-  return <button type="button" onClick={() => onSelect(item.id)} aria-pressed={selected} className={cn("min-w-[190px] rounded-lg border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan", selected ? "border-signal-cyan bg-signal-cyan/[0.09] shadow-[inset_0_0_0_1px_rgba(34,211,238,0.18)]" : "border-white/[0.09] bg-black/15 hover:border-signal-cyan/40")}><span className="flex items-start justify-between gap-3"><span><span className="block text-sm font-semibold text-white">{item.label}</span><span className="mt-1 block text-xs text-slate-400">{item.cameraLabel}</span></span>{item.needsAttention ? <AlertTriangle className="h-4 w-4 shrink-0 text-amber-200" aria-label="Needs attention" /> : null}</span><span className="mt-3 block text-xs text-slate-400">{item.lastSeen ? `Last seen ${relativeTime(item.lastSeen)}` : "Last seen unavailable"}</span></button>;
+  return <button type="button" onClick={() => onSelect(item.id)} aria-pressed={selected} className={cn("min-w-[190px] rounded-lg border p-3 text-start transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan", selected ? "border-signal-cyan bg-signal-cyan/[0.09] shadow-[inset_0_0_0_1px_rgba(34,211,238,0.18)]" : "border-white/[0.09] bg-black/15 hover:border-signal-cyan/40")}><span className="flex items-start justify-between gap-3"><span><span className="block text-sm font-semibold text-white">{item.label}</span><span className="mt-1 block text-xs text-slate-400">{item.cameraLabel}</span></span>{item.needsAttention ? <AlertTriangle className="h-4 w-4 shrink-0 text-amber-200" aria-label="Needs attention" /> : null}</span><span className="mt-3 block text-xs text-slate-400">{item.lastSeen ? `Last seen ${relativeTime(item.lastSeen)}` : "Last seen unavailable"}</span></button>;
 }
 
 function CameraViewCard({ item, selected, onSelect }: { item: LiveTrackingItem; selected: boolean; onSelect: (id: string) => void }) {
   const camera = item.camera;
   if (!camera) return null;
   const canShowImage = item.cameraPreviewState === "live";
-  return <button type="button" onClick={() => onSelect(item.id)} aria-pressed={selected} className={cn("group relative min-h-[136px] overflow-hidden rounded-lg border bg-black/35 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan", selected ? "border-signal-cyan shadow-[0_0_0_1px_rgba(34,211,238,0.55)]" : "border-white/[0.1] hover:border-signal-cyan/45")}>{canShowImage ? <>
+  return <button type="button" onClick={() => onSelect(item.id)} aria-pressed={selected} className={cn("group relative min-h-[136px] overflow-hidden rounded-lg border bg-black/35 text-start transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan", selected ? "border-signal-cyan shadow-[0_0_0_1px_rgba(34,211,238,0.55)]" : "border-white/[0.1] hover:border-signal-cyan/45")}>{canShowImage ? <>
     {/* Snapshot images use the authenticated server-side proxy and cannot use Next's remote image optimiser. */}
     {/* eslint-disable-next-line @next/next/no-img-element */}
     <img src={snapshotUrl(camera.camera_id, `thumb-${item.id}`)} alt={`Latest image from ${item.cameraLabel}`} className="absolute inset-0 h-full w-full object-cover opacity-65 transition group-hover:opacity-80" />
@@ -146,10 +146,11 @@ export function TrackingPreview({ item }: { item: LiveTrackingItem | null }) {
   const [snapshotFailed, setSnapshotFailed] = useState(false);
 
   useEffect(() => {
-    if (!camera || state !== "live") return undefined;
-    const timer = window.setInterval(() => setSnapshotGeneration((value) => value + 1), 1_000);
+    const canRefreshSnapshot = camera?.runtime.status === "online" && camera.runtime.running;
+    if (!canRefreshSnapshot) return undefined;
+    const timer = window.setInterval(() => setSnapshotGeneration((value) => value + 1), 50);
     return () => window.clearInterval(timer);
-  }, [camera, state]);
+  }, [camera?.camera_id, camera?.runtime.running, camera?.runtime.status]);
 
   useEffect(() => {
     if (!camera || state !== "live" || typeof WebSocket === "undefined") return undefined;
@@ -161,8 +162,13 @@ export function TrackingPreview({ item }: { item: LiveTrackingItem | null }) {
 
     connectTimer = window.setTimeout(() => {
       if (disposed) return;
-      try {
-        socket = new WebSocket(endpoint);
+      void (async () => {
+        try {
+          socket = await createAuthenticatedWebSocket(endpoint);
+          if (disposed) {
+            socket.close();
+            return;
+          }
         socket.onmessage = (event) => {
           try {
             const parsed = cameraWebSocketMessageSchema.safeParse(JSON.parse(event.data));
@@ -172,9 +178,10 @@ export function TrackingPreview({ item }: { item: LiveTrackingItem | null }) {
             // sends a malformed frame message.
           }
         };
-      } catch {
-        // Keep the authenticated snapshot fallback active.
-      }
+        } catch {
+          // Keep the authenticated snapshot fallback active.
+        }
+      })();
     }, 0);
 
     return () => {
@@ -193,18 +200,18 @@ export function TrackingPreview({ item }: { item: LiveTrackingItem | null }) {
     {/* The source is either a WebSocket frame or the authenticated snapshot proxy. */}
     {/* eslint-disable-next-line @next/next/no-img-element */}
     <img src={source} alt={`Latest image from ${item.cameraLabel}`} className="h-full w-full object-contain" onError={() => { if (!frame) setSnapshotFailed(true); }} />
-    {frame ? <span className="absolute left-4 top-4 rounded-md border border-emerald-300/40 bg-command-950/85 px-2.5 py-1 text-xs font-semibold text-emerald-200">Live image</span> : <span className="absolute left-4 top-4 rounded-md border border-signal-cyan/35 bg-command-950/85 px-2.5 py-1 text-xs font-semibold text-signal-cyan">Latest camera image</span>}
-    <span className="absolute bottom-4 left-4 rounded-md border border-white/15 bg-command-950/85 px-2.5 py-1 text-xs font-semibold text-white">{item.label}</span>
-    {item.needsAttention && item.riskLabel ? <span className="absolute bottom-4 right-4 rounded-md border border-amber-300/40 bg-amber-300/[0.16] px-2.5 py-1 text-xs font-semibold text-amber-100">{item.riskLabel}</span> : null}
+    {frame ? <span className="absolute start-4 top-4 rounded-md border border-emerald-300/40 bg-command-950/85 px-2.5 py-1 text-xs font-semibold text-emerald-200">Live image</span> : <span className="absolute start-4 top-4 rounded-md border border-signal-cyan/35 bg-command-950/85 px-2.5 py-1 text-xs font-semibold text-signal-cyan">Latest camera image</span>}
+    <span className="absolute bottom-4 start-4 rounded-md border border-white/15 bg-command-950/85 px-2.5 py-1 text-xs font-semibold text-white">{item.label}</span>
+    {item.needsAttention && item.riskLabel ? <span className="absolute bottom-4 end-4 rounded-md border border-amber-300/40 bg-amber-300/[0.16] px-2.5 py-1 text-xs font-semibold text-amber-100">{item.riskLabel}</span> : null}
   </div>;
 }
 
 function PreviewUnavailable({ state, onRetry }: { state: CameraPreviewState; onRetry?: () => void }) {
-  return <div className="flex aspect-[16/9] min-h-[260px] flex-col items-center justify-center bg-black px-6 text-center sm:min-h-[380px]">{state === "offline" ? <WifiOff className="h-8 w-8 text-slate-500" aria-hidden /> : state === "delayed" ? <Clock3 className="h-8 w-8 text-amber-200" aria-hidden /> : <MonitorX className="h-8 w-8 text-slate-500" aria-hidden />}<p className="mt-4 text-base font-semibold text-slate-200">{previewMessage(state)}</p><p className="mt-1 text-sm text-slate-500">{state === "unavailable" ? "A camera relationship was not returned for this tracked activity." : state === "offline" ? "Check the camera connection before reviewing new activity." : "The latest camera image has not arrived yet."}</p>{onRetry ? <button type="button" onClick={onRetry} className="mt-4 min-h-9 rounded-md border border-signal-cyan/40 px-3 text-sm font-semibold text-signal-cyan transition hover:bg-signal-cyan/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan">Retry preview</button> : null}</div>;
+  return <div className="flex aspect-[16/9] min-h-[260px] flex-col items-center justify-center bg-black px-6 text-center sm:min-h-[380px]">{state === "offline" ? <WifiOff className="h-8 w-8 text-slate-500" aria-hidden /> : state === "delayed" ? <Clock3 className="h-8 w-8 text-amber-200" aria-hidden /> : <MonitorX className="h-8 w-8 text-slate-500" aria-hidden />}<p className="mt-4 text-base font-semibold text-slate-200">{previewMessage(state)}</p><p className="mt-1 text-sm text-slate-500">{state === "unavailable" ? "No camera view is available for this tracked activity." : state === "offline" ? "Check the camera connection before reviewing new activity." : "The latest camera image has not arrived yet."}</p>{onRetry ? <button type="button" onClick={onRetry} className="mt-4 min-h-9 rounded-md border border-signal-cyan/40 px-3 text-sm font-semibold text-signal-cyan transition hover:bg-signal-cyan/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan">Retry preview</button> : null}</div>;
 }
 
 export function TrackingDetailsPanel({ item }: { item: LiveTrackingItem | null }) {
-  if (!item) return <section className="glass-panel flex min-h-[500px] flex-col items-center justify-center rounded-xl p-8 text-center"><Crosshair className="h-8 w-8 text-slate-600" aria-hidden /><h2 className="mt-4 text-xl font-semibold text-white">Select tracked activity</h2><p className="mt-2 max-w-sm text-sm leading-6 text-slate-400">Choose a person, vehicle, or other tracked object to review the information returned by the system.</p></section>;
+  if (!item) return <section className="glass-panel flex min-h-[500px] flex-col items-center justify-center rounded-xl p-8 text-center"><Crosshair className="h-8 w-8 text-slate-600" aria-hidden /><h2 className="mt-4 text-xl font-semibold text-white">Select tracked activity</h2><p className="mt-2 max-w-sm text-sm leading-6 text-slate-400">Choose a person, vehicle, or other activity to review available information.</p></section>;
   const historyId = `tracking-history-${item.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   const cameraHref = item.camera ? `/cameras?camera=${encodeURIComponent(item.camera.camera_id)}&view=focus` : null;
 
@@ -232,11 +239,11 @@ function TrackingTechnicalDetails({ item }: { item: LiveTrackingItem }) {
 }
 
 function TrackingEmptyState() {
-  return <section className="glass-panel flex min-h-[500px] flex-col items-center justify-center rounded-xl p-8 text-center"><CheckCircle2 className="h-8 w-8 text-slate-600" aria-hidden /><h2 className="mt-4 text-xl font-semibold text-white">No tracked activity matches this view.</h2><p className="mt-2 max-w-sm text-sm leading-6 text-slate-400">New tracked activity will appear when it is returned by the tracking service.</p></section>;
+  return <section className="glass-panel flex min-h-[500px] flex-col items-center justify-center rounded-xl p-8 text-center"><CheckCircle2 className="h-8 w-8 text-slate-600" aria-hidden /><h2 className="mt-4 text-xl font-semibold text-white">No tracked activity matches this view.</h2><p className="mt-2 max-w-sm text-sm leading-6 text-slate-400">New tracked activity will appear when movement is detected.</p></section>;
 }
 
 function TrackingUnavailableState({ onRetry }: { onRetry: () => void }) {
-  return <div className="mt-6 rounded-xl border border-rose-400/25 bg-rose-500/[0.06] p-6"><div className="flex items-start gap-3"><WifiOff className="mt-0.5 h-5 w-5 text-rose-300" aria-hidden /><div><h2 className="text-lg font-semibold text-rose-100">Live tracking is temporarily unavailable.</h2><p className="mt-1 text-sm text-rose-100/75">The tracking service did not return current activity. Try again when it is available.</p><button type="button" onClick={onRetry} className="mt-4 inline-flex min-h-9 items-center rounded-md border border-rose-300/35 px-3 text-sm font-semibold text-rose-100 transition hover:bg-rose-400/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200">Retry</button></div></div></div>;
+  return <div className="mt-6 rounded-xl border border-eose-400/25 bg-rose-500/[0.06] p-6"><div className="flex items-start gap-3"><WifiOff className="mt-0.5 h-5 w-5 text-rose-300" aria-hidden /><div><h2 className="text-lg font-semibold text-rose-100">Live tracking is temporarily unavailable.</h2><p className="mt-1 text-sm text-rose-100/75">Current tracking activity could not be loaded. Try again.</p><button type="button" onClick={onRetry} className="mt-4 inline-flex min-h-9 items-center rounded-md border border-eose-300/35 px-3 text-sm font-semibold text-rose-100 transition hover:bg-rose-400/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200">Retry</button></div></div></div>;
 }
 
 function CameraDataUnavailableNotice() {
@@ -290,13 +297,13 @@ function diagnosticRows(item: LiveTrackingItem) {
   };
   add("Track reference", item.track.track_id);
   add("Camera reference", item.cameraId);
-  add("Source class", item.track.class_name);
+  add("Activity type", item.track.class_name);
   add("Risk level", item.track.risk_level);
   add("Risk score", item.track.risk_score);
   add("First seen", item.firstSeen);
   add("Last seen", item.lastSeen);
   add("Camera runtime", item.camera?.runtime.status);
-  add("Camera diagnostic", item.camera?.runtime.error_message ?? undefined);
+  if (item.camera?.runtime.error_message) add("Camera status", "Needs attention");
   return rows;
 }
 

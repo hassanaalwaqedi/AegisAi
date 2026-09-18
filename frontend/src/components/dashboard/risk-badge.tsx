@@ -6,7 +6,7 @@ type RiskBadgeProps = {
 };
 
 export function RiskBadge({ level }: RiskBadgeProps) {
-  if (!level) return <Badge variant="outline">Not returned</Badge>;
+  if (!level) return <Badge variant="outline">Unavailable</Badge>;
 
   const normalized = level.toUpperCase();
   const variant =

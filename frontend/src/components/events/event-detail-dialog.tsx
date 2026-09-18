@@ -3,7 +3,7 @@
 import { X } from "lucide-react";
 import { RiskBadge } from "@/components/dashboard/risk-badge";
 import { Button } from "@/components/ui/button";
-import { formatDecimal, formatTimestamp, getEventExplanation, getEventFactors, getEventObject, getEventRiskScore, getEventSeverity, getEventTitle } from "@/lib/data-format";
+import { formatDecimal, formatOperatorLabel, formatOperatorList, formatTimestamp, getEventExplanation, getEventFactors, getEventObject, getEventRiskScore, getEventSeverity, getEventTitle } from "@/lib/data-format";
 import type { RiskEvent } from "@/types";
 
 type EventDetailDialogProps = {
@@ -34,39 +34,39 @@ export function EventDetailDialog({ event, onClose }: EventDetailDialogProps) {
             <DetailItem label="Severity" value={<RiskBadge level={String(getEventSeverity(event)).toUpperCase()} />} />
             <DetailItem label="Timestamp" value={formatTimestamp(event.timestamp)} />
             <DetailItem label="Object" value={getEventObject(event)} />
-            <DetailItem label="Track ID" value={event.track_id ?? "Not returned"} />
+            <DetailItem label="Tracking ID" value={event.track_id ?? "Unavailable"} />
             <DetailItem label="Risk score" value={formatDecimal(getEventRiskScore(event), 2)} />
             <DetailItem label="Confidence" value={formatDecimal(event.confidence, 2)} />
-            <DetailItem label="Verification" value={event.verification_status ?? "Not returned"} />
-            <DetailItem label="Evidence" value={event.evidence_type ?? "Not returned"} />
+            <DetailItem label="Verification" value={formatOperatorLabel(event.verification_status)} />
+            <DetailItem label="Evidence" value={formatOperatorLabel(event.evidence_type)} />
             <DetailItem label="Weapon" value={formatWeapon(event)} />
             <DetailItem label="Association" value={formatAssociation(event)} />
-            <DetailItem label="Stable frames" value={event.stable_frames ?? "Not returned"} />
-            <DetailItem label="Model source" value={event.model_source?.length ? event.model_source.join(", ") : "Not returned"} />
-            <DetailItem label="Zone" value={event.zone ?? "Not returned"} />
-            <DetailItem label="Camera" value={event.camera_id ?? "Not returned"} />
+            <DetailItem label="Observed duration" value={event.stable_frames ?? "Unavailable"} />
+            <DetailItem label="Activity source" value={formatOperatorList(event.model_source)} />
+            <DetailItem label="Zone" value={event.zone ?? "Unavailable"} />
+            <DetailItem label="Camera" value={event.camera_id ?? "Unavailable"} />
           </div>
 
           <section>
-            <h3 className="text-sm font-semibold text-white">Backend explanation</h3>
+            <h3 className="text-sm font-semibold text-white">Why this needs review</h3>
             <p className="mt-2 rounded-md border border-white/8 bg-white/[0.035] p-3 text-sm leading-6 text-slate-300">
-              {getEventExplanation(event) ?? "Explanation not returned by backend for this event."}
+              {getEventExplanation(event) ?? "No additional explanation is available for this alert."}
             </p>
           </section>
 
           <section>
-            <h3 className="text-sm font-semibold text-white">Reason codes</h3>
+            <h3 className="text-sm font-semibold text-white">Why it needs review</h3>
             {factors.length ? (
               <div className="mt-2 flex flex-wrap gap-2">
                 {factors.map((factor) => (
                   <span key={factor} className="rounded-md border border-white/10 bg-white/[0.045] px-2 py-1 text-xs text-slate-300">
-                    {factor}
+                    {formatOperatorLabel(factor)}
                   </span>
                 ))}
               </div>
             ) : (
               <p className="mt-2 rounded-md border border-amber-300/20 bg-amber-300/[0.055] p-3 text-sm text-amber-100/75">
-                Risk factors were not returned by the backend for this event.
+                No additional review reasons are available for this alert.
               </p>
             )}
           </section>
@@ -86,15 +86,15 @@ function DetailItem({ label, value }: { label: string; value: React.ReactNode })
 }
 
 function formatWeapon(event: RiskEvent) {
-  if (!event.weapon_class) return "Not returned";
+  if (!event.weapon_class) return "Unavailable";
   const confidence = typeof event.weapon_confidence === "number" ? ` (${formatDecimal(event.weapon_confidence, 2)})` : "";
-  return `${event.weapon_class}${confidence}`;
+  return `${formatOperatorLabel(event.weapon_class)}${confidence}`;
 }
 
 function formatAssociation(event: RiskEvent) {
-  if (!event.association_type) return "Not returned";
-  const person = event.person_track_id ? `Person #${event.person_track_id}` : "person not returned";
+  if (!event.association_type) return "Unavailable";
+  const person = event.person_track_id ? `Person #${event.person_track_id}` : "person unavailable";
   const weapon = event.weapon_track_id ? `Weapon #${event.weapon_track_id}` : event.weapon_class ?? "weapon";
-  const score = typeof event.association_score === "number" ? `score ${formatDecimal(event.association_score, 2)}` : "score not returned";
-  return `${event.association_type}: ${weapon} with ${person}, ${score}`;
+  const score = typeof event.association_score === "number" ? `confidence ${formatDecimal(event.association_score, 2)}` : "confidence unavailable";
+  return `${formatOperatorLabel(event.association_type)}: ${formatOperatorLabel(weapon)} with ${person}, ${score}`;
 }

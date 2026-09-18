@@ -13,6 +13,7 @@
 *.crt
 secrets/
 credentials/
+data/cameras/credentials.json
 
 # ═══════════════════════════════════════════════════════════
 # PYTHON

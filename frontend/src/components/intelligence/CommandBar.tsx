@@ -22,7 +22,7 @@ export default function CommandBar({ chatAvailability, chatReason }: CommandBarP
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const enabled = chatAvailability === "live";
-  const unavailableReason = chatReason ?? `Text AI chat is ${availabilityLabel(chatAvailability).toLowerCase()} in the current Intelligence context.`;
+  const unavailableReason = chatReason ? "Aegis chat is waiting for current system information." : `Aegis chat is ${availabilityLabel(chatAvailability).toLowerCase()}.`;
 
   const submit = useCallback(async (event: React.FormEvent) => {
     event.preventDefault();
@@ -35,7 +35,7 @@ export default function CommandBar({ chatAvailability, chatReason }: CommandBarP
       setResponse(await sendChatMessage(message));
       setQuery("");
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Text AI chat could not be completed.");
+      setError("Aegis could not complete that request. Try again.");
     } finally {
       setLoading(false);
     }
@@ -45,7 +45,7 @@ export default function CommandBar({ chatAvailability, chatReason }: CommandBarP
     <div className="w-full">
       <form onSubmit={submit} className="flex items-center gap-2 rounded-xl border border-signal-cyan/[0.08] bg-[#0a0f1a]/80 px-3 py-2">
         <Command size={14} className="shrink-0 text-signal-cyan/40" />
-        <input value={query} onChange={(event) => setQuery(event.target.value)} disabled={!enabled || loading} placeholder={enabled ? "Ask the configured read-only AI service…" : unavailableReason} className="min-w-0 flex-1 bg-transparent text-[11px] text-white/90 outline-none placeholder:text-white/20 disabled:cursor-not-allowed" aria-describedby={!enabled ? "chat-capability-reason" : undefined} />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} disabled={!enabled || loading} placeholder={enabled ? "Ask Aegis" : unavailableReason} className="min-w-0 flex-1 bg-transparent text-[11px] text-white/90 outline-none placeholder:text-white/20 disabled:cursor-not-allowed" aria-describedby={!enabled ? "chat-capability-reason" : undefined} />
         <button type="submit" disabled={!enabled || !query.trim() || loading} className="rounded-lg p-1.5 text-signal-cyan disabled:opacity-30" title={enabled ? "Send text request" : unavailableReason}>{loading ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}</button>
       </form>
       {!enabled && <p id="chat-capability-reason" className="mt-1 text-center text-[9px] text-white/25">Text chat unavailable: {unavailableReason}</p>}

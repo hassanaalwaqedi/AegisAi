@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Mic, Square } from "lucide-react";
+import { useTranslations } from "next-intl";
 
 import { availabilityLabel, type Availability } from "@/lib/intelligence-context";
 import type { AudibleRiskVisualState } from "@/hooks/useAudibleRiskAlerts";
@@ -67,6 +68,7 @@ export default function AIOrb({
   const measuredScale = 1 + Math.min(0.2, Math.max(0, realLevel) * 0.2);
   const hasMeasuredLevel = realLevel > 0.015;
   const stateLabel = voiceCoreStateLabel(voiceState);
+  const t = useTranslations("intelligence");
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -150,7 +152,7 @@ export default function AIOrb({
         aria-describedby="aegis-voice-core-status"
       >
         <span className="aegis-core-wordmark">AEGIS</span>
-        <span className="aegis-core-caption">Intelligence core</span>
+        <span className="aegis-core-caption">{t("core")}</span>
         <span className="aegis-core-state" style={{ color: colors.dot }}>
           <span style={{ backgroundColor: colors.dot }} />{stateLabel}
         </span>
@@ -162,11 +164,11 @@ export default function AIOrb({
         onClick={onListenToggle}
         disabled={!listeningEnabled}
         className="aegis-core-action"
-        aria-label={voiceSessionActive ? "Stop listening" : "Ask Aegis"}
+        aria-label={voiceSessionActive ? t("stopListening") : t("askAegis")}
         title={voiceSessionActive ? "Stop listening and release the microphone" : "Microphone access begins only after this click."}
       >
         {voiceSessionActive ? <Square size={12} /> : <Mic size={13} />}
-        {voiceSessionActive ? "Stop listening" : "Voice"}
+        {voiceSessionActive ? t("stopListening") : t("voice")}
       </button>
 
       <span id="aegis-voice-core-status" className="sr-only" aria-live="polite">{statusDescription}</span>

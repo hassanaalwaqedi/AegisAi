@@ -10,7 +10,7 @@ const CRITICAL_REPEAT_COOLDOWN_MS = 60_000;
 
 export type AudibleRiskLevel = "MEDIUM" | "HIGH" | "CRITICAL";
 export type AudibleRiskVisualState = "watching" | "attention" | "high_risk" | "unavailable";
-export type AudibleRiskControlState = "muted" | "watching" | "attention" | "high_risk" | "unavailable";
+export type AudibleRiskControlState = "muted" | "arming" | "watching" | "attention" | "high_risk" | "unavailable";
 export type GeminiAlertPlaybackResult = "spoken" | "unavailable" | "busy";
 
 export type AudibleRiskAlert = {
@@ -51,12 +51,12 @@ function wording(level: Extract<AudibleRiskLevel, "HIGH" | "CRITICAL">, cameraId
   const nearCamera = cameraId ? ` near ${cameraId}` : "";
   if (level === "CRITICAL") {
     return {
-      spokenText: `Critical attention required. Operator review needed immediately${nearCamera}.`,
+      spokenText: `Critical risk event detected${nearCamera}. Evidence has been saved. Immediate operator review is required.`,
       panelText: `${cameraId ? `${cameraId} - ` : ""}Operator review needed immediately.`,
     };
   }
   return {
-    spokenText: `High priority alert. Operator review recommended${nearCamera}.`,
+    spokenText: `High-risk event detected${nearCamera}. Evidence has been saved. Operator review is required.`,
     panelText: `${cameraId ? `${cameraId} - ` : ""}Operator review recommended.`,
   };
 }
@@ -67,7 +67,7 @@ function wording(level: Extract<AudibleRiskLevel, "HIGH" | "CRITICAL">, cameraId
  * client poll can select a candidate but can never authorize its wording.
  */
 export function assessAudibleRisk(context: IntelligenceContext | null): AudibleRiskAssessment {
-  if (!context || context.overall.status !== "live") {
+  if (!context) {
     return { visualState: "unavailable", speechCandidate: null };
   }
 
@@ -156,9 +156,11 @@ function speakWithBrowserFallback(alert: AudibleRiskAlert) {
   if (!browserSpeechFallbackAvailable()) return false;
   try {
     const utterance = new SpeechSynthesisUtterance(alert.spokenText);
-    utterance.rate = 0.95;
-    utterance.pitch = 1;
-    utterance.volume = 0.9;
+    // Browser speech is only a fallback. A 0.84 Web Speech pitch is roughly
+    // three semitones below neutral, and 0.92 keeps alerts deliberate but clear.
+    utterance.rate = 0.92;
+    utterance.pitch = 0.84;
+    utterance.volume = 0.8;
     window.speechSynthesis.cancel();
     window.speechSynthesis.speak(utterance);
     return true;
@@ -193,24 +195,53 @@ export function useAudibleRiskAlerts({
   const spokenByIdRef = useRef(new Map<string, AlertMemory>());
   const lastSpokenAtRef = useRef<number | null>(null);
   const inFlightAlertRef = useRef<string | null>(null);
+  const preparingOutputRef = useRef(false);
   const onSpokenAlertRef = useRef(onSpokenAlert);
-  onSpokenAlertRef.current = onSpokenAlert;
   const assessment = useMemo(() => assessAudibleRisk(context), [context]);
 
   useEffect(() => {
-    setBrowserFallbackAvailable(browserSpeechFallbackAvailable());
-    setEnabled(readStoredEnabled());
+    onSpokenAlertRef.current = onSpokenAlert;
+  }, [onSpokenAlert]);
+
+  useEffect(() => {
+    // Defer hydration-only preference reads by one task. This preserves a
+    // stable server render and avoids a synchronous effect-driven re-render.
+    const task = window.setTimeout(() => {
+      setBrowserFallbackAvailable(browserSpeechFallbackAvailable());
+      setEnabled(readStoredEnabled());
+    }, 0);
+    return () => window.clearTimeout(task);
   }, []);
 
   useEffect(() => {
     // A configuration change must not make a stale readiness value look live.
-    setGeminiPlaybackState(geminiAvailable ? "unknown" : "unavailable");
+    const task = window.setTimeout(() => {
+      setGeminiPlaybackState(geminiAvailable ? "unknown" : "unavailable");
+    }, 0);
+    return () => window.clearTimeout(task);
   }, [geminiAvailable]);
 
   const stopSpeech = useCallback(() => {
     stopGeminiAudio();
     if (browserSpeechFallbackAvailable()) window.speechSynthesis.cancel();
   }, [stopGeminiAudio]);
+
+  const armGeminiOutput = useCallback(async () => {
+    if (!geminiAvailable || geminiPlaybackState === "ready" || preparingOutputRef.current) {
+      return geminiPlaybackState === "ready";
+    }
+
+    // `prepare` must run in a browser user-activation callback. It resumes the
+    // output-only AudioContext; it never requests microphone access.
+    preparingOutputRef.current = true;
+    try {
+      const prepared = await prepareGeminiAudio();
+      setGeminiPlaybackState(prepared ? "ready" : "unavailable");
+      return prepared;
+    } finally {
+      preparingOutputRef.current = false;
+    }
+  }, [geminiAvailable, geminiPlaybackState, prepareGeminiAudio]);
 
   const setAudibleAlertsEnabled = useCallback(async (nextEnabled: boolean) => {
     if (!nextEnabled) {
@@ -222,12 +253,28 @@ export function useAudibleRiskAlerts({
 
     // This runs from the visible opt-in control. It primes the native Gemini
     // player without opening the microphone or listening in the background.
-    let prepared = false;
-    if (geminiAvailable) prepared = await prepareGeminiAudio();
-    setGeminiPlaybackState(geminiAvailable && prepared ? "ready" : "unavailable");
+    if (geminiAvailable) await armGeminiOutput();
     setEnabled(true);
     persistEnabled(true);
-  }, [geminiAvailable, prepareGeminiAudio, stopSpeech]);
+  }, [armGeminiOutput, geminiAvailable, stopSpeech]);
+
+  useEffect(() => {
+    if (!enabled || !geminiAvailable || geminiPlaybackState !== "unknown") return;
+
+    // The operator has already opted in and their preference is persisted.
+    // After a refresh, browsers require one user interaction before they allow
+    // native audio to resume. Arm output on that first interaction instead of
+    // making the operator find and toggle the alert control again.
+    const armFromUserGesture = () => {
+      void armGeminiOutput();
+    };
+    window.addEventListener("pointerdown", armFromUserGesture, { once: true, passive: true });
+    window.addEventListener("keydown", armFromUserGesture, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", armFromUserGesture);
+      window.removeEventListener("keydown", armFromUserGesture);
+    };
+  }, [armGeminiOutput, enabled, geminiAvailable, geminiPlaybackState]);
 
   useEffect(() => {
     if (!enabled || !assessment.speechCandidate || inFlightAlertRef.current) return;
@@ -240,8 +287,9 @@ export function useAudibleRiskAlerts({
       now,
     })) return;
 
-    // A persisted preference does not grant autoplay permission for a new
-    // page load. Wait for the next explicit toggle to prime Gemini audio.
+    // A persisted preference still needs one browser user activation after a
+    // page load. The gesture listener above arms it automatically; until then
+    // this guard prevents an untrusted autoplay attempt.
     if (geminiAvailable && geminiPlaybackState === "unknown") return;
 
     let cancelled = false;
@@ -292,7 +340,9 @@ export function useAudibleRiskAlerts({
     : browserFallbackAvailable === false;
   const state: AudibleRiskControlState = !enabled
     ? "muted"
-    : outputUnavailable || assessment.visualState === "unavailable"
+    : geminiAvailable && geminiPlaybackState === "unknown"
+      ? "arming"
+      : outputUnavailable || assessment.visualState === "unavailable"
       ? "unavailable"
       : assessment.visualState;
 

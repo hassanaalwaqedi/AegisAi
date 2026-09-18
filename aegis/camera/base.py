@@ -8,6 +8,7 @@ VideoCapture loop base class with reconnection behavior.
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 from collections import deque
@@ -21,9 +22,16 @@ from aegis.camera.types import (
     CameraConfig,
     CameraConnectionStatus,
     CameraRuntimeStatus,
+    CameraSourceType,
     FrameCallback,
     StatusCallback,
 )
+from aegis.camera.connection_tests import (
+    CameraConnectionTestResult,
+    endpoint_probe,
+    frame_snapshot_data_url,
+)
+from aegis.camera.utils import mask_url
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +87,16 @@ class BaseCameraSource:
 
     def test_connection(self) -> Tuple[bool, Optional[str]]:
         raise NotImplementedError
+
+    def test_connection_details(self) -> CameraConnectionTestResult:
+        ok, error = self.test_connection()
+        return CameraConnectionTestResult(
+            ok=ok,
+            status="online" if ok else "failed",
+            error_category=None if ok else "connection_failed",
+            error_message=error,
+            masked_url=mask_url(self.config.url),
+        )
 
     def check_health(self, stale_after_seconds: float = 5.0) -> None:
         if not self._running:
@@ -152,8 +170,17 @@ class BaseCameraSource:
         self._last_publish_ts = now
 
         height, width = frame.shape[:2]
+
+        # Optimize preview encode to prevent blocking the capture loop.
+        # Use 1280-wide cap so the live feed stays sharp on large monitors
+        # while still being much cheaper to encode than raw frames.
+        preview_frame = frame
+        if width > 1280:
+            scale = 1280 / width
+            preview_frame = cv2.resize(frame, (1280, int(height * scale)))
+
         encode_ok, encoded = cv2.imencode(
-            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82]
+            ".jpg", preview_frame, [cv2.IMWRITE_JPEG_QUALITY, 85]
         )
         with self._frame_lock:
             self._latest_frame = frame.copy()
@@ -201,21 +228,79 @@ class OpenCVLoopCameraSource(BaseCameraSource):
             self._thread.join(timeout=2.0)
 
     def test_connection(self) -> Tuple[bool, Optional[str]]:
+        result = self.test_connection_details()
+        return result.ok, result.error_message
+
+    def test_connection_details(self) -> CameraConnectionTestResult:
+        started_at = time.monotonic()
+        raw_url = self.config.url if isinstance(self._capture_source, str) else None
+        probe = endpoint_probe(raw_url, self.config.connection_timeout)
+        if probe.get("category") in {"invalid_url", "dns_failed", "timeout", "host_unreachable"}:
+            return CameraConnectionTestResult(
+                ok=False,
+                status="failed",
+                error_category=str(probe["category"]),
+                error_message=str(probe.get("message") or "Camera host is unavailable."),
+                dns_resolved=probe.get("dns_resolved"),
+                host_reachable=probe.get("host_reachable"),
+                masked_url=mask_url(raw_url),
+            )
+
         capture = self._open_capture()
         try:
             if capture is None or not capture.isOpened():
-                return False, "OpenCV could not open this camera source"
+                return CameraConnectionTestResult(
+                    ok=False,
+                    status="failed",
+                    error_category="authentication_or_stream_rejected",
+                    error_message="Camera rejected the stream or credentials could not be verified.",
+                    dns_resolved=probe.get("dns_resolved"),
+                    host_reachable=probe.get("host_reachable"),
+                    masked_url=mask_url(raw_url),
+                )
             ok, frame = capture.read()
             if not ok or frame is None:
-                return False, "Camera opened but did not return a frame"
-            return True, None
+                return CameraConnectionTestResult(
+                    ok=False,
+                    status="failed",
+                    error_category="no_frame",
+                    error_message="Camera connection opened but no video frame was received.",
+                    dns_resolved=probe.get("dns_resolved"),
+                    host_reachable=probe.get("host_reachable"),
+                    masked_url=mask_url(raw_url),
+                )
+            height, width = frame.shape[:2]
+            return CameraConnectionTestResult(
+                ok=True,
+                status="online",
+                dns_resolved=probe.get("dns_resolved"),
+                host_reachable=probe.get("host_reachable"),
+                time_to_first_frame_ms=round((time.monotonic() - started_at) * 1000),
+                width=int(width),
+                height=int(height),
+                masked_url=mask_url(raw_url),
+                snapshot_data_url=frame_snapshot_data_url(frame),
+            )
         finally:
             if capture is not None:
                 capture.release()
 
     def _open_capture(self) -> Optional[cv2.VideoCapture]:
         if isinstance(self._capture_source, str):
-            capture = cv2.VideoCapture(self._capture_source, cv2.CAP_FFMPEG)
+            params = [
+                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, int(self.config.connection_timeout * 1000),
+                cv2.CAP_PROP_READ_TIMEOUT_MSEC, int(self.config.connection_timeout * 1000)
+            ]
+            capture = cv2.VideoCapture(self._capture_source, cv2.CAP_FFMPEG, params)
+        elif (
+            self.config.source_type == CameraSourceType.LOCAL_DEVICE
+            and sys.platform == "win32"
+            and hasattr(cv2, "CAP_DSHOW")
+        ):
+            # Media Foundation can report a local camera as opened while never
+            # delivering a frame.  DirectShow is the reliable OpenCV backend
+            # for the USB camera verified on this Windows host.
+            capture = cv2.VideoCapture(self._capture_source, cv2.CAP_DSHOW)
         else:
             capture = cv2.VideoCapture(self._capture_source)
 
@@ -238,6 +323,12 @@ class OpenCVLoopCameraSource(BaseCameraSource):
 
         while self._running:
             self._capture = self._open_capture()
+            # Opening a network source may block until its timeout. The
+            # operator can stop the camera while that call is in progress;
+            # do not publish a late reconnecting/offline transition afterward.
+            if not self._running:
+                self._release_capture()
+                break
             if self._capture is None or not self._capture.isOpened():
                 retries += 1
                 self._reconnect_count = retries
@@ -255,7 +346,9 @@ class OpenCVLoopCameraSource(BaseCameraSource):
                 retry_delay = min(retry_delay * 2, 20.0)
                 continue
 
-            self._set_status(CameraConnectionStatus.ONLINE)
+            # Opening an RTSP handle is not evidence of a usable camera.  The
+            # first successful _publish_frame call below is the only place
+            # that promotes this source to ONLINE.
             retry_delay = 1.0
             failures = 0
             frame_interval = self._get_frame_interval(self._capture)
@@ -266,7 +359,20 @@ class OpenCVLoopCameraSource(BaseCameraSource):
                 and self._capture is not None
                 and self._capture.isOpened()
             ):
-                ok, frame = self._capture.read()
+                try:
+                    ok, frame = self._capture.read()
+                except cv2.error as exc:
+                    # stop() may release VideoCapture from another thread to
+                    # interrupt a blocked read. Treat that as normal shutdown,
+                    # while preserving a useful warning for genuine failures.
+                    if not self._running:
+                        break
+                    logger.warning(
+                        "OpenCV frame read failed camera_id=%s error=%s",
+                        self.camera_id,
+                        exc,
+                    )
+                    ok, frame = False, None
                 if not ok or frame is None:
                     if self._finite:
                         self._set_status(
@@ -292,7 +398,12 @@ class OpenCVLoopCameraSource(BaseCameraSource):
             self._release_capture()
 
         self._release_capture()
-        if self._status not in (
+        if self._status == CameraConnectionStatus.ERROR:
+            # The retry loop has terminated.  Expose that fact so an operator
+            # can use Start to make a new connection attempt without first
+            # issuing an otherwise unintuitive Stop request.
+            self._running = False
+        elif self._status not in (
             CameraConnectionStatus.ERROR,
             CameraConnectionStatus.STOPPED,
         ):

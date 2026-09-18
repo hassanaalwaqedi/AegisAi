@@ -1,0 +1,49 @@
+name: aegis-rtsp-demo
+
+x-simulator: &simulator
+  image: jrottenberg/ffmpeg:7.1-alpine
+  depends_on:
+    mediamtx:
+      condition: service_started
+  restart: unless-stopped
+  volumes:
+    - ../../data/uploads:/media:ro
+
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: aegis-rtsp-demo-server
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8554:8554"
+
+  camera-01:
+    <<: *simulator
+    command: ["-stream_loop", "-1", "-re", "-i", "/media/df67a73dd50c450395a4fb97c6a40adb.mp4", "-an", "-vf", "fps=5,scale=640:360", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "5", "-keyint_min", "5", "-f", "rtsp", "-rtsp_transport", "tcp", "rtsp://mediamtx:8554/aegis-cam-01"]
+  camera-02:
+    <<: *simulator
+    command: ["-stream_loop", "-1", "-re", "-i", "/media/d27264e2d3814386a6a575ca831fc666.mp4", "-an", "-vf", "fps=5,scale=640:360", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "5", "-keyint_min", "5", "-f", "rtsp", "-rtsp_transport", "tcp", "rtsp://mediamtx:8554/aegis-cam-02"]
+  camera-03:
+    <<: *simulator
+    command: ["-stream_loop", "-1", "-re", "-i", "/media/73a167d7c833468ea5da5b4ce341e481.mp4", "-an", "-vf", "fps=5,scale=640:360", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "5", "-keyint_min", "5", "-f", "rtsp", "-rtsp_transport", "tcp", "rtsp://mediamtx:8554/aegis-cam-03"]
+  camera-04:
+    <<: *simulator
+    command: ["-stream_loop", "-1", "-re", "-i", "/media/4272094eb1aa484fa9c31c54d3d14f16.mp4", "-an", "-vf", "fps=5,scale=640:360", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "5", "-keyint_min", "5", "-f", "rtsp", "-rtsp_transport", "tcp", "rtsp://mediamtx:8554/aegis-cam-04"]
+  camera-05:
+    <<: *simulator
+    command: ["-stream_loop", "-1", "-re", "-i", "/media/25f0860fa2f54933ac2a3198f6479215.mp4", "-an", "-vf", "fps=5,scale=640:360", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "5", "-keyint_min", "5", "-f", "rtsp", "-rtsp_transport", "tcp", "rtsp://mediamtx:8554/aegis-cam-05"]
+  camera-06:
+    <<: *simulator
+    command: ["-stream_loop", "-1", "-re", "-i", "/media/2136ee8519ba46fb9fb72d7699385b14.mp4", "-an", "-vf", "fps=5,scale=640:360", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "5", "-keyint_min", "5", "-f", "rtsp", "-rtsp_transport", "tcp", "rtsp://mediamtx:8554/aegis-cam-06"]
+  camera-07:
+    <<: *simulator
+    command: ["-stream_loop", "-1", "-re", "-i", "/media/064db0869be84ffc997d532179c73a49.mp4", "-an", "-vf", "fps=5,scale=640:360", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "5", "-keyint_min", "5", "-f", "rtsp", "-rtsp_transport", "tcp", "rtsp://mediamtx:8554/aegis-cam-07"]
+  camera-08:
+    <<: *simulator
+    command: ["-stream_loop", "-1", "-re", "-i", "/media/df67a73dd50c450395a4fb97c6a40adb.mp4", "-an", "-vf", "fps=5,scale=640:360,hue=h=35", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "5", "-keyint_min", "5", "-f", "rtsp", "-rtsp_transport", "tcp", "rtsp://mediamtx:8554/aegis-cam-08"]
+  camera-09:
+    <<: *simulator
+    command: ["-stream_loop", "-1", "-re", "-i", "/media/d27264e2d3814386a6a575ca831fc666.mp4", "-an", "-vf", "fps=5,scale=640:360,hue=h=95", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "5", "-keyint_min", "5", "-f", "rtsp", "-rtsp_transport", "tcp", "rtsp://mediamtx:8554/aegis-cam-09"]
+  camera-10:
+    <<: *simulator
+    command: ["-stream_loop", "-1", "-re", "-i", "/media/73a167d7c833468ea5da5b4ce341e481.mp4", "-an", "-vf", "fps=5,scale=640:360,hue=h=155", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "5", "-keyint_min", "5", "-f", "rtsp", "-rtsp_transport", "tcp", "rtsp://mediamtx:8554/aegis-cam-10"]

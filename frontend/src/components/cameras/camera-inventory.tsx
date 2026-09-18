@@ -37,7 +37,7 @@ export function CameraInventory({
   const actionError = startCamera.error || stopCamera.error || deleteCamera.error;
 
   if (query.isLoading) return <LoadingState label="Loading cameras" />;
-  if (query.isError) return <ErrorState error={query.error} title="/cameras unavailable" />;
+  if (query.isError) return <ErrorState error={query.error} title="Camera list unavailable" />;
 
   const cameras = query.data?.cameras ?? [];
 
@@ -45,19 +45,19 @@ export function CameraInventory({
     <Card>
       <CardHeader>
         <div>
-          <CardTitle>Camera Inventory</CardTitle>
-          <CardDescription>All rows are returned by the backend camera registry.</CardDescription>
+          <CardTitle>Camera List</CardTitle>
+          <CardDescription>Manage saved cameras and their current status.</CardDescription>
         </div>
         <ShieldCheck className="h-5 w-5 text-signal-cyan" aria-hidden />
       </CardHeader>
 
-      {actionError ? <p className="mb-3 rounded-md border border-rose-400/25 bg-rose-500/[0.08] p-3 text-sm text-rose-100">{getErrorMessage(actionError)}</p> : null}
+      {actionError ? <p className="mb-3 rounded-md border border-eose-400/25 bg-rose-500/[0.08] p-3 text-sm text-rose-100">{getErrorMessage(actionError)}</p> : null}
 
       {cameras.length === 0 ? (
-        <EmptyState title="No cameras registered" description="Add a real camera source or upload a test video to begin processing." />
+        <EmptyState title="No cameras added" description="Add a camera or video source to begin monitoring." />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-left text-sm">
+          <table className="w-full min-w-[760px] text-start text-sm">
             <thead className="border-b border-white/10 text-xs uppercase tracking-[0.14em] text-slate-500">
               <tr>
                 <th className="pb-3 font-medium">Camera</th>
@@ -65,7 +65,7 @@ export function CameraInventory({
                 <th className="pb-3 font-medium">Status</th>
                 <th className="pb-3 font-medium">Frames</th>
                 <th className="pb-3 font-medium">Last frame</th>
-                <th className="pb-3 text-right font-medium">Controls</th>
+                <th className="pb-3 text-end font-medium">Controls</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/10">
@@ -78,21 +78,21 @@ export function CameraInventory({
                     className={cn("cursor-pointer transition hover:bg-white/[0.035]", selected && "bg-signal-cyan/10")}
                     onClick={() => onSelect(camera)}
                   >
-                    <td className="py-3 pr-4 align-top">
+                    <td className="py-3 pe-4 align-top">
                       <p className="font-medium text-white">{camera.name || camera.camera_id}</p>
                       <p className="mt-1 text-xs text-slate-500">{camera.camera_id}</p>
                       {camera.url ? <p className="mt-1 max-w-[260px] truncate text-xs text-slate-500">{camera.url}</p> : null}
-                      {camera.runtime.error_message ? <p className="mt-1 max-w-[320px] text-xs text-rose-200">{camera.runtime.error_message}</p> : null}
+                      {camera.runtime.error_message ? <p className="mt-1 max-w-[320px] text-xs text-rose-200">Camera needs attention. Check the camera connection and setup.</p> : null}
                     </td>
-                    <td className="py-3 pr-4 align-top text-slate-300">{sourceLabels[camera.source_type]}</td>
-                    <td className="py-3 pr-4 align-top">
+                    <td className="py-3 pe-4 align-top text-slate-300">{sourceLabels[camera.source_type]}</td>
+                    <td className="py-3 pe-4 align-top">
                       <CameraStatusBadge status={camera.runtime.status} />
                     </td>
-                    <td className="py-3 pr-4 align-top text-slate-300">
+                    <td className="py-3 pe-4 align-top text-slate-300">
                       <p>{camera.runtime.frames_received ?? 0}</p>
                       <p className="text-xs text-slate-500">{camera.runtime.fps ?? 0} FPS</p>
                     </td>
-                    <td className="py-3 pr-4 align-top text-slate-400">{formatTime(camera.runtime.last_frame_time ?? undefined)}</td>
+                    <td className="py-3 pe-4 align-top text-slate-400">{formatTime(camera.runtime.last_frame_time ?? undefined)}</td>
                     <td className="py-3 align-top">
                       <div className="flex justify-end gap-2">
                         {camera.runtime.running ? (

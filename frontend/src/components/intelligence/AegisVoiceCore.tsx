@@ -2,12 +2,14 @@
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { BellOff, BellRing, ExternalLink, Keyboard, MessageSquareText, Mic, RotateCcw, Settings2, ShieldCheck, Square, X } from "lucide-react";
+import { useTranslations } from "next-intl";
 
 import AIOrb from "@/components/intelligence/AIOrb";
 import NodeOrbit from "@/components/intelligence/NodeOrbit";
 import { useGeminiLiveVoice } from "@/hooks/useGeminiLiveVoice";
 import { useAudibleRiskAlerts, type AudibleRiskAlert } from "@/hooks/useAudibleRiskAlerts";
 import { sendChatMessage } from "@/lib/ai-api";
+import { fetchActiveIncidents, fetchRecentPersistedEvidence, persistedEvidenceSnapshotUrl, type PersistedEvidence, type PersistedIncident } from "@/lib/evidence-api";
 import { fetchLiveCapabilities, type AegisVoiceCoreState, type LiveCitation, type SafeUICommand } from "@/lib/live-voice";
 import { availabilityLabel, type Availability, type IntelligenceContext } from "@/lib/intelligence-context";
 import type { AgentNode } from "@/types/intelligence";
@@ -85,8 +87,13 @@ export default function AegisVoiceCore({
   const [latestResponse, setLatestResponse] = useState<string | null>(null);
   const [citations, setCitations] = useState<LiveCitation[]>([]);
   const [conversation, setConversation] = useState<ConversationEntry[]>([]);
+  const [persistedEvidence, setPersistedEvidence] = useState<PersistedEvidence[]>([]);
+  const [persistedEvidenceState, setPersistedEvidenceState] = useState<"idle" | "loading" | "ready" | "unavailable">("idle");
+  const [activeIncidents, setActiveIncidents] = useState<PersistedIncident[]>([]);
+  const [activeIncidentsState, setActiveIncidentsState] = useState<"idle" | "loading" | "ready" | "unavailable">("idle");
   const [approvedCommand, setApprovedCommand] = useState<SafeUICommand | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const t = useTranslations("intelligence");
 
   const onSpokenRiskAlert = useCallback((alert: AudibleRiskAlert) => {
     const label = alert.level === "CRITICAL" ? "Critical" : "High Risk";
@@ -167,6 +174,40 @@ export default function AegisVoiceCore({
   }, []);
 
   useEffect(() => {
+    if (!drawerOpen) return;
+
+    const controller = new AbortController();
+    void fetchRecentPersistedEvidence(controller.signal)
+      .then((evidence) => {
+        setPersistedEvidence(evidence);
+        setPersistedEvidenceState("ready");
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setPersistedEvidence([]);
+        setPersistedEvidenceState("unavailable");
+      });
+    return () => controller.abort();
+  }, [drawerOpen]);
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+
+    const controller = new AbortController();
+    void fetchActiveIncidents(controller.signal)
+      .then((incidents) => {
+        setActiveIncidents(incidents);
+        setActiveIncidentsState("ready");
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setActiveIncidents([]);
+        setActiveIncidentsState("unavailable");
+      });
+    return () => controller.abort();
+  }, [drawerOpen]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target;
       if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
@@ -191,17 +232,19 @@ export default function AegisVoiceCore({
 
   const coreState = coreStateFor(voiceState, voiceError, contextAvailability, capability?.availability);
   const canUseVoice = contextAvailability === "live" && capability?.availability === "live";
-  const unavailableMessage = "Voice unavailable";
+  const unavailableMessage = t("voiceUnavailable");
   const passiveVoiceState = voiceState === "off" || voiceState === "ready";
   const audibleStateLabel = audibleAlerts.state === "high_risk"
-    ? "High Risk"
+    ? t("highRisk")
     : audibleAlerts.state === "attention"
-      ? "Attention"
-      : audibleAlerts.state === "watching"
-        ? "Watching"
-        : audibleAlerts.state === "muted"
-          ? "Muted"
-          : "Unavailable";
+      ? t("attention")
+    : audibleAlerts.state === "watching"
+      ? t("watching")
+      : audibleAlerts.state === "muted"
+        ? t("muted")
+        : audibleAlerts.state === "arming"
+          ? t("audioReady")
+          : t("unavailable");
   const beaconLabel = isCapturing ? "Listening" : passiveVoiceState ? audibleStateLabel : voiceCoreStateLabel(coreState);
 
   const toggleListening = () => {
@@ -225,7 +268,7 @@ export default function AegisVoiceCore({
     }
 
     if (textChatAvailability !== "live") {
-      setTypedError("Typed fallback is unavailable until either a Live session or the read-only text service is live.");
+      setTypedError("Text requests are unavailable until Aegis is ready.");
       return;
     }
 
@@ -241,8 +284,8 @@ export default function AegisVoiceCore({
         { id: `aegis-${Date.now()}-${current.length + 1}`, speaker: "aegis" as const, text: response.answer, citations: [] },
       ].slice(-20));
       setTypedText("");
-    } catch (nextError) {
-      setTypedError(nextError instanceof Error ? nextError.message : "Typed fallback could not be completed.");
+    } catch {
+      setTypedError("Aegis could not complete that request. Try again.");
     } finally {
       setTypedLoading(false);
     }
@@ -259,6 +302,12 @@ export default function AegisVoiceCore({
     // Close it before creating one fresh, explicit operator-initiated session.
     stopVoice();
     void startListening();
+  };
+
+  const openEvidenceDrawer = () => {
+    setPersistedEvidenceState("loading");
+    setActiveIncidentsState("loading");
+    setDrawerOpen(true);
   };
 
   return (
@@ -290,26 +339,32 @@ export default function AegisVoiceCore({
         {sessionActive && (
           <div className="aegis-session-inline" role="status" aria-live="polite">
             <span>{sessionPhase === "listening" ? "Listening" : sessionPhase === "processing" ? "Thinking" : "Responding"}</span>
-            <span className="tabular-nums">{sessionSecondsRemaining}s remaining</span>
-            <div role="progressbar" aria-label="Voice session time remaining" aria-valuemin={0} aria-valuemax={60} aria-valuenow={sessionSecondsRemaining}><i style={{ width: `${Math.max(0, Math.min(100, (sessionSecondsRemaining / 60) * 100))}%` }} /></div>
+            {sessionPhase === "listening" ? (
+              <>
+                <span className="tabular-nums">{sessionSecondsRemaining}s remaining</span>
+                <div role="progressbar" aria-label="Voice session time remaining" aria-valuemin={0} aria-valuemax={60} aria-valuenow={sessionSecondsRemaining}><i style={{ width: `${Math.max(0, Math.min(100, (sessionSecondsRemaining / 60) * 100))}%` }} /></div>
+              </>
+            ) : (
+              <span>{sessionPhase === "processing" ? "Preparing response" : "Playback active"}</span>
+            )}
           </div>
         )}
 
         {(sessionOutcome === "timeout" || sessionOutcome === "cancelled") && <span className="aegis-voice-status-badge" role="status">{sessionOutcome === "timeout" ? "Voice session timed out" : "Listening cancelled"}</span>}
         {latestOperatorText && sessionPhase === "listening" && <span className="sr-only" aria-live="polite">{latestOperatorText}</span>}
-        {latestResponse && <button type="button" onClick={() => setDrawerOpen(true)} className="aegis-response-ready" aria-label="Open Conversation and Evidence">Response ready<span className="sr-only">{latestResponse}</span></button>}
+        {latestResponse && <button type="button" onClick={openEvidenceDrawer} className="aegis-response-ready" aria-label="Open Conversation and Evidence">Response ready<span className="sr-only">{latestResponse}</span></button>}
 
         <div className="aegis-compact-controls">
         {sessionActive && (
           <button type="button" onClick={stopVoice} className="aegis-compact-button is-stop" aria-label="Stop listening, microphone capture, and audio playback">
-            <Square size={11} /> Cancel
+            <Square size={11} /> {t("cancel")}
           </button>
         )}
         <button type="button" onClick={() => setTextFallbackOpen((open) => !open)} className="aegis-compact-button" aria-expanded={textFallbackOpen} aria-controls="aegis-voice-text-fallback">
-          <MessageSquareText size={12} /> Ask <span>/</span>
+          <MessageSquareText size={12} /> {t("askAegis")} <span>/</span>
         </button>
         <button type="button" onClick={() => void startListening()} disabled={!canUseVoice} title={canUseVoice ? "Start a voice session" : "Voice is unavailable"} className="aegis-compact-button" aria-label={canUseVoice ? "Ask Aegis by voice" : "Voice unavailable"}>
-          <Mic size={12} /> Voice
+          <Mic size={12} /> {t("voice")}
         </button>
         <button
           type="button"
@@ -322,25 +377,25 @@ export default function AegisVoiceCore({
         >
           {audibleAlerts.enabled ? <BellRing size={12} /> : <BellOff size={12} />}
         </button>
-        {audibleAlerts.state !== "unavailable" && <span className="aegis-audible-alert-state" data-state={audibleAlerts.state} role="status">{audibleStateLabel}</span>}
+        <span className="aegis-audible-alert-state" data-state={audibleAlerts.state} role="status">{audibleStateLabel}</span>
         {(conversation.length > 0 || citations.length > 0) && (
-          <button type="button" onClick={() => setDrawerOpen(true)} className="aegis-compact-button" aria-label="Open Conversation and Evidence">
-            <MessageSquareText size={12} /> Evidence
+          <button type="button" onClick={openEvidenceDrawer} className="aegis-compact-button" aria-label="Open Conversation and Evidence">
+            <MessageSquareText size={12} /> {t("evidence")}
           </button>
         )}
-        {onOpenOperations && <button type="button" onClick={onOpenOperations} className="aegis-compact-button" aria-label="Open operational context"><Settings2 size={12} /> Settings</button>}
+        {onOpenOperations && <button type="button" onClick={onOpenOperations} className="aegis-compact-button" aria-label="Open operational context"><Settings2 size={12} /> {t("settings")}</button>}
         </div>
 
         {coreState === "degraded" && <span className="aegis-voice-status-badge">{unavailableMessage}</span>}
-        {voiceError && <span className="aegis-voice-status-badge" role="alert">Voice needs attention<span className="sr-only">: {voiceError}</span></span>}
-        {coreState === "error" && !voiceError && <span className="aegis-voice-status-badge" role="alert">Voice unavailable</span>}
-        {coreState === "error" && canUseVoice && <button type="button" onClick={reconnectVoice} className="aegis-reconnect"><RotateCcw size={11} />Reconnect voice</button>}
+        {voiceError && <span className="aegis-voice-status-badge" role="alert">{t("voiceNeedsAttention")}<span className="sr-only">: Voice assistance is temporarily unavailable.</span></span>}
+        {coreState === "error" && !voiceError && <span className="aegis-voice-status-badge" role="alert">{t("voiceUnavailable")}</span>}
+        {coreState === "error" && canUseVoice && <button type="button" onClick={reconnectVoice} className="aegis-reconnect"><RotateCcw size={11} />{t("reconnectVoice")}</button>}
 
       {textFallbackOpen && (
         <form id="aegis-voice-text-fallback" onSubmit={submitTextFallback} className="aegis-typed-fallback" aria-label="Typed voice fallback">
-          <Keyboard size={13} className="ml-1 text-signal-cyan/70" />
-          <input ref={inputRef} value={typedText} onChange={(event) => setTypedText(event.target.value)} placeholder="Type a request for Live voice or the read-only text service" className="min-w-0 flex-1 bg-transparent text-[11px] text-white/90 outline-none placeholder:text-white/30" />
-          <button type="submit" disabled={typedLoading} className="rounded-md bg-signal-cyan px-2 py-1 text-[10px] font-semibold text-[#061019] disabled:opacity-45">{typedLoading ? "Sending" : "Send"}</button>
+          <Keyboard size={13} className="ms-1 text-signal-cyan/70" />
+          <input ref={inputRef} value={typedText} onChange={(event) => setTypedText(event.target.value)} placeholder={t("typeRequest")} className="min-w-0 flex-1 bg-transparent text-[11px] text-white/90 outline-none placeholder:text-white/30" />
+          <button type="submit" disabled={typedLoading} className="rounded-md bg-signal-cyan px-2 py-1 text-[10px] font-semibold text-[#061019] disabled:opacity-45">{typedLoading ? t("sending") : t("send")}</button>
           <button type="button" onClick={() => setTextFallbackOpen(false)} className="rounded p-1 text-white/50 hover:text-white" aria-label="Close typed fallback"><X size={13} /></button>
           {typedError && <p className="sr-only" role="alert">{typedError}</p>}
         </form>
@@ -357,13 +412,13 @@ export default function AegisVoiceCore({
       </div>
 
       {drawerOpen && (
-        <aside className="fixed inset-y-0 right-0 z-50 flex w-[min(420px,calc(100vw-1rem))] flex-col border-l border-signal-cyan/15 bg-[#090f1b]/98 p-4 shadow-[-18px_0_60px_rgba(0,0,0,0.45)]" role="dialog" aria-modal="true" aria-labelledby="conversation-evidence-title">
+        <aside className="fixed inset-y-0 end-0 z-50 flex w-[min(420px,calc(100vw-1rem))] flex-col border-s border-signal-cyan/15 bg-[#090f1b]/98 p-4 shadow-[-18px_0_60px_rgba(0,0,0,0.45)]" role="dialog" aria-modal="true" aria-labelledby="conversation-evidence-title">
           <div className="flex items-center justify-between gap-3">
-            <div><h3 id="conversation-evidence-title" className="text-sm font-semibold text-white/90">Conversation &amp; Evidence</h3><p className="mt-1 text-[10px] text-white/45">Only this session&apos;s returned transcript and evidence are shown.</p></div>
+            <div><h3 id="conversation-evidence-title" className="text-sm font-semibold text-white/90">{t("conversation")}</h3><p className="mt-1 text-[10px] text-white/45">{t("conversationDesc")}</p></div>
             <button type="button" onClick={() => setDrawerOpen(false)} className="rounded p-1 text-white/60 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan" aria-label="Close Conversation and Evidence"><X size={17} /></button>
           </div>
-          <div className="custom-scrollbar mt-4 flex-1 space-y-2 overflow-y-auto pr-1">
-            {conversation.length === 0 && <p className="rounded-lg border border-dashed border-white/10 p-3 text-[10px] leading-relaxed text-white/40">No voice conversation has been returned for this session.</p>}
+          <div className="custom-scrollbar mt-4 flex-1 space-y-2 overflow-y-auto pe-1">
+            {conversation.length === 0 && <p className="rounded-lg border border-dashed border-white/10 p-3 text-[10px] leading-relaxed text-white/40">No voice conversation yet.</p>}
             {conversation.map((entry) => (
               <div key={entry.id} className={`rounded-lg border p-2.5 ${entry.speaker === "operator" ? "border-signal-cyan/15 bg-signal-cyan/[0.04]" : "border-white/[0.07] bg-white/[0.03]"}`}>
                 <p className="text-[8px] font-semibold uppercase tracking-wider text-white/40">{entry.speaker === "operator" ? "Operator" : "Aegis"}</p>
@@ -372,11 +427,76 @@ export default function AegisVoiceCore({
               </div>
             ))}
             {citations.length > 0 && <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5"><p className="text-[8px] font-semibold uppercase tracking-wider text-white/40">Latest evidence</p>{citations.map((citation) => <CitationLink key={citation.evidenceId} citation={citation} />)}</div>}
+            <ActiveIncidentsList incidents={activeIncidents} state={activeIncidentsState} />
+            <PersistedEvidenceList evidence={persistedEvidence} state={persistedEvidenceState} />
           </div>
         </aside>
       )}
     </section>
   );
+}
+
+function ActiveIncidentsList({ incidents, state }: { incidents: PersistedIncident[]; state: "idle" | "loading" | "ready" | "unavailable" }) {
+  const t = useTranslations("intelligence");
+  if (state === "idle") return null;
+  return (
+    <section className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5" aria-label="Active incident context">
+      <p className="text-[8px] font-semibold uppercase tracking-wider text-white/40">{t("activeIncidents")}</p>
+      {state === "loading" && <p className="mt-2 text-[10px] text-white/45">Loading incident information…</p>}
+      {state === "unavailable" && <p className="mt-2 text-[10px] text-white/45">Incident information is unavailable.</p>}
+      {state === "ready" && incidents.length === 0 && <p className="mt-2 text-[10px] text-white/45">No active incidents.</p>}
+      {state === "ready" && incidents.map((incident) => {
+        const camera = incident.camera_id || "Camera unavailable";
+        const reason = incident.summary_reason || "No additional incident summary is available.";
+        return (
+          <article key={incident.incident_id} className="mt-2 rounded-md border border-signal-cyan/10 bg-signal-cyan/[0.025] p-2">
+            <p className="text-[10px] font-semibold text-white/85">Incident Â· {camera}</p>
+            <p className="mt-0.5 text-[10px] text-white/55"><span className="text-signal-cyan">{incident.current_risk_level || "Risk unavailable"}</span> Â· {incident.evidence_ids.length} linked evidence</p>
+            <p className="mt-1 line-clamp-2 text-[10px] leading-snug text-white/55">{reason}</p>
+            {incident.last_seen_time && <p className="mt-1 text-[8px] text-white/35">Updated {compactEvidenceTime(incident.last_seen_time)}</p>}
+          </article>
+        );
+      })}
+    </section>
+  );
+}
+
+function PersistedEvidenceList({ evidence, state }: { evidence: PersistedEvidence[]; state: "idle" | "loading" | "ready" | "unavailable" }) {
+  const t = useTranslations("intelligence");
+  if (state === "idle") return null;
+  return (
+    <section className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5" aria-label="Recent persisted alert evidence">
+      <p className="text-[8px] font-semibold uppercase tracking-wider text-white/40">{t("savedAlerts")}</p>
+      {state === "loading" && <p className="mt-2 text-[10px] text-white/45">Loading saved evidence…</p>}
+      {state === "unavailable" && <p className="mt-2 text-[10px] text-white/45">Saved evidence is unavailable.</p>}
+      {state === "ready" && evidence.length === 0 && <p className="mt-2 text-[10px] text-white/45">No saved high- or critical-risk evidence.</p>}
+      {state === "ready" && evidence.map((item) => {
+        const snapshotUrl = persistedEvidenceSnapshotUrl(item);
+        const reason = item.reason || item.message || "No additional explanation is available.";
+        const camera = item.camera_name || item.camera_id || "Camera unavailable";
+        return (
+          <article key={item.event_id} className="mt-2 flex gap-2 rounded-md border border-signal-cyan/10 bg-signal-cyan/[0.025] p-2">
+            {snapshotUrl ? (
+              <a href={snapshotUrl} target="_blank" rel="noreferrer" aria-label={`Open saved keyframe for ${item.event_id}`} className="h-10 w-14 shrink-0 overflow-hidden rounded border border-white/10">
+                {/* eslint-disable-next-line @next/next/no-img-element -- authenticated evidence thumbnails flow through the server-side API proxy. */}
+                <img src={snapshotUrl} alt="Saved alert keyframe" className="h-full w-full object-cover" loading="lazy" />
+              </a>
+            ) : <span className="flex h-10 w-14 shrink-0 items-center justify-center rounded border border-dashed border-white/10 text-[8px] text-white/35">No frame</span>}
+            <div className="min-w-0 flex-1">
+              <p className="text-[10px] font-semibold text-white/85"><span className="text-signal-cyan">{item.risk_level || "Unknown"}</span> · {camera}</p>
+              <p className="mt-0.5 line-clamp-2 text-[10px] leading-snug text-white/55">{reason}</p>
+              {item.timestamp && <p className="mt-1 text-[8px] text-white/35">{compactEvidenceTime(item.timestamp)}</p>}
+            </div>
+          </article>
+        );
+      })}
+    </section>
+  );
+}
+
+function compactEvidenceTime(timestamp: string) {
+  const parsed = new Date(timestamp);
+  return Number.isNaN(parsed.getTime()) ? timestamp : parsed.toLocaleString();
 }
 
 function CitationLink({ citation }: { citation: LiveCitation }) {

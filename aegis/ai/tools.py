@@ -16,6 +16,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from aegis.intelligence.event_access import load_persisted_event_records, merge_event_records
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,7 +28,7 @@ logger = logging.getLogger(__name__)
 def get_system_health() -> Dict[str, Any]:
     """Get overall system health status."""
     result: Dict[str, Any] = {
-        "status": "healthy",
+        "availability": "available",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "platform": platform.system(),
     }
@@ -64,6 +66,9 @@ def get_system_health() -> Dict[str, Any]:
     except Exception:
         result["yolo_model"] = "unknown"
 
+    critical = (result.get("database") == "connected" and result.get("pipeline") == "running")
+    model_available = result.get("yolo_model") not in {"not_found", "unknown"}
+    result["status"] = "healthy" if critical and model_available else "degraded"
     return result
 
 
@@ -102,48 +107,49 @@ def get_database_status() -> Dict[str, Any]:
 def get_camera_status() -> Dict[str, Any]:
     """Get status of all cameras."""
     try:
-        from aegis.camera.registry import CameraRegistry
-        registry = CameraRegistry()
-        cameras = registry.list()
-        online = [c for c in cameras if getattr(c, "status", "") == "online"]
-        offline = [c for c in cameras if getattr(c, "status", "") != "online"]
+        from aegis.api.routes.cameras import get_camera_manager
+
+        cameras = get_camera_manager().list_cameras()
+        online = [camera for camera in cameras if (camera.get("runtime") or {}).get("status") == "online" and (camera.get("runtime") or {}).get("running")]
+        offline = [camera for camera in cameras if (camera.get("runtime") or {}).get("status") in {"offline", "error", "stopped"}]
 
         return {
+            "availability": "available",
             "total": len(cameras),
             "online": len(online),
             "offline": len(offline),
             "cameras": [
                 {
-                    "camera_id": getattr(c, "camera_id", "unknown"),
-                    "name": getattr(c, "name", ""),
-                    "status": getattr(c, "status", "unknown"),
-                    "source_type": getattr(c, "source_type", "unknown"),
+                    "camera_id": camera.get("camera_id"),
+                    "name": camera.get("name") or "",
+                    "status": (camera.get("runtime") or {}).get("status", "unknown"),
+                    "source_type": camera.get("source_type", "unknown"),
                 }
-                for c in cameras[:20]  # Limit to avoid huge payloads
+                for camera in cameras[:20]  # Limit to avoid huge payloads
             ],
         }
     except Exception as exc:
-        logger.debug("Camera status unavailable: %s", exc)
-        return {"total": 0, "online": 0, "offline": 0, "cameras": [], "error": str(exc)}
+        logger.warning("Camera status unavailable: %s", type(exc).__name__)
+        return {"availability": "unavailable", "reason": "Camera runtime status is unavailable."}
 
 
 def get_camera_detail(camera_id: str) -> Dict[str, Any]:
     """Get detailed info for a specific camera."""
     try:
-        from aegis.camera.registry import CameraRegistry
-        registry = CameraRegistry()
-        config = registry.get(camera_id)
+        from aegis.api.routes.cameras import get_camera_manager
+
+        config = get_camera_manager().get_camera(camera_id)
         if config is None:
-            return {"error": f"Camera {camera_id} not found"}
+            return {"availability": "available", "error": f"Camera {camera_id} not found"}
         return {
-            "camera_id": config.camera_id,
-            "name": getattr(config, "name", ""),
-            "status": getattr(config, "status", "unknown"),
-            "source_type": getattr(config, "source_type", ""),
-            "url": getattr(config, "url", ""),
+            "availability": "available",
+            "camera_id": config.get("camera_id"),
+            "name": config.get("name") or "",
+            "status": (config.get("runtime") or {}).get("status", "unknown"),
+            "source_type": config.get("source_type", ""),
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return {"availability": "unavailable", "reason": "Camera runtime status is unavailable."}
 
 
 # ---------------------------------------------------------------------------
@@ -151,58 +157,47 @@ def get_camera_detail(camera_id: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def get_recent_events(limit: int = 10) -> List[Dict[str, Any]]:
-    """Get recent events from the database or event buffer."""
+    """Get recent events from the active runtime and durable evidence store."""
+    bounded_limit = max(1, min(int(limit), 100))
+    stage_events: List[Dict[str, Any]] = []
     try:
         from aegis.pipeline.startup import get_alerting_stage
         stage = get_alerting_stage()
         if stage:
-            return stage.get_recent_events(limit=limit)
+            stage_events = stage.get_recent_events(limit=bounded_limit)
     except Exception:
-        pass
+        stage_events = []
 
-    # Fallback: try database
+    runtime_events: List[Dict[str, Any]] = []
     try:
-        from aegis.database.connection import get_db_session
-        from aegis.database.repositories import EventRepository
-        # ``get_db_session`` is a context manager.  Passing it directly to a
-        # repository leaves the repository with a context-manager object,
-        # rather than an entered SQLAlchemy Session.
-        with get_db_session() as session:
-            events = EventRepository(session).get_recent(limit=limit)
-            return [
-                {
-                    "id": str(e.id),
-                    "event_id": str(e.id),
-                    "type": e.event_type,
-                    "event_type": e.event_type,
-                    # Camera ID is retained in metadata by the active
-                    # aegis.database persistence path; older records may only
-                    # have the camera/zone field.
-                    "camera_id": ((e.event_metadata or {}).get("camera_id") or e.zone),
-                    "timestamp": (e.timestamp or e.created_at).isoformat() if (e.timestamp or e.created_at) else None,
-                    "risk_level": e.risk_level,
-                    "risk_score": e.risk_score,
-                    "message": e.message,
-                    "data": e.event_metadata or {},
-                }
-                for e in events
-            ]
+        from aegis.api.state import get_state
+
+        runtime_events = get_state().get_events(limit=bounded_limit)
+    except Exception as exc:
+        logger.debug("Runtime event state unavailable: %s", exc)
+
+    try:
+        durable_events = load_persisted_event_records(limit=bounded_limit)
     except Exception as exc:
         logger.debug("Recent persisted events unavailable: %s", exc)
-        return []
+        durable_events = []
+
+    merged = merge_event_records(durable_events, stage_events, runtime_events, limit=bounded_limit)
+    return [_event_projection(event) for event in merged]
 
 
 def get_active_alerts(limit: int = 10) -> List[Dict[str, Any]]:
-    """Get active/recent alerts."""
+    """Get durable unacknowledged alert records, never inferred events."""
+    bounded_limit = max(1, min(int(limit), 100))
     try:
-        from aegis.pipeline.startup import get_alerting_stage
-        stage = get_alerting_stage()
-        if stage:
-            events = stage.get_recent_events(limit=limit)
-            return [e for e in events if e.get("type") == "risk_alert"]
-    except Exception:
-        pass
-    return []
+        from aegis.database.connection import get_db_session
+        from aegis.database.repositories import OperationalAlertRepository
+
+        with get_db_session() as session:
+            return [record.to_dict() for record in OperationalAlertRepository(session).get_active(bounded_limit)]
+    except Exception as exc:
+        logger.warning("Durable alerts unavailable: %s", type(exc).__name__)
+        raise RuntimeError("Durable alert storage is unavailable.") from exc
 
 
 def get_high_risk_events(limit: int = 5) -> List[Dict[str, Any]]:
@@ -219,19 +214,18 @@ def get_high_risk_events(limit: int = 5) -> List[Dict[str, Any]]:
 def get_active_tracks() -> Dict[str, Any]:
     """Get current active tracking information."""
     try:
-        from aegis.pipeline.startup import get_alerting_stage
-        stage = get_alerting_stage()
-        if stage:
-            recent = stage.get_recent_detections(limit=5)
-            total_tracks = sum(d.get("track_count", 0) for d in recent)
-            return {
-                "active_cameras_processing": len(set(d.get("camera_id") for d in recent)),
-                "total_recent_tracks": total_tracks,
-                "recent_detections": recent[:5],
-            }
-    except Exception:
-        pass
-    return {"active_cameras_processing": 0, "total_recent_tracks": 0, "recent_detections": []}
+        from aegis.api.state import get_state
+
+        tracks = get_state().get_tracks()
+        return {
+            "availability": "available",
+            "active_cameras_processing": len({track.get("camera_id") for track in tracks if track.get("camera_id")} ),
+            "total_recent_tracks": len(tracks),
+            "recent_detections": tracks[:5],
+        }
+    except Exception as exc:
+        logger.warning("Active tracking unavailable: %s", type(exc).__name__)
+        return {"availability": "unavailable", "reason": "Live tracking state is unavailable."}
 
 
 # ---------------------------------------------------------------------------
@@ -246,12 +240,14 @@ def get_detection_statistics() -> Dict[str, Any]:
         if pipeline:
             stats = pipeline.get_stats()
             return {
+                "availability": "available",
                 "pipeline_running": stats.get("running", False),
                 "stages": stats.get("stages", []),
             }
-    except Exception:
-        pass
-    return {"pipeline_running": False, "stages": []}
+    except Exception as exc:
+        logger.warning("Pipeline statistics unavailable: %s", type(exc).__name__)
+        return {"availability": "unavailable", "reason": "Pipeline statistics are unavailable."}
+    return {"availability": "unavailable", "reason": "Pipeline is not initialized."}
 
 
 # ---------------------------------------------------------------------------
@@ -270,8 +266,9 @@ def generate_incident_report(incident_id: Optional[str] = None) -> Dict[str, Any
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "system_health": health,
         "cameras_summary": {
-            "total": cameras.get("total", 0),
-            "online": cameras.get("online", 0),
+            "availability": cameras.get("availability", "unavailable"),
+            "total": cameras.get("total"),
+            "online": cameras.get("online"),
         },
         "events_count": len(events),
         "alerts_count": len(alerts),
@@ -291,11 +288,43 @@ def search_semantic(query: str) -> Dict[str, Any]:
         state = get_state()
         engine = getattr(state, "semantic_query_engine", None)
         if engine:
-            results = engine.search(query)
-            return {"query": query, "results": results, "count": len(results)}
-    except Exception:
-        pass
-    return {"query": query, "results": [], "count": 0, "message": "Semantic search not available"}
+            try:
+                durable_events = load_persisted_event_records(limit=100)
+            except Exception as exc:
+                return {
+                    "query": query,
+                    "availability": "unavailable",
+                    "reason": "Durable evidence storage is unavailable.",
+                    "results": [],
+                    "count": 0,
+                }
+            execution = engine.search(
+                prompt=query,
+                tracks=state.get_tracks(),
+                events=merge_event_records(durable_events, state.get_events(limit=100)),
+                statistics=state.get_statistics(),
+            )
+            return {"query": query, "availability": "available", "results": execution.results, "count": len(execution.results)}
+    except Exception as exc:
+        logger.debug("Semantic search unavailable: %s", exc)
+    return {"query": query, "availability": "unavailable", "reason": "Semantic search is not available.", "results": [], "count": 0}
+
+
+def _event_projection(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the legacy tool response stable while sourcing unified events."""
+    event_id = str(event.get("event_id") or event.get("id") or "")
+    return {
+        "id": str(event.get("id") or event_id),
+        "event_id": event_id,
+        "type": event.get("type") or event.get("event_type"),
+        "event_type": event.get("event_type") or event.get("type"),
+        "camera_id": event.get("camera_id") or event.get("zone"),
+        "timestamp": event.get("timestamp"),
+        "risk_level": event.get("risk_level") or event.get("severity"),
+        "risk_score": event.get("risk_score"),
+        "message": event.get("message") or event.get("explanation") or event.get("description") or "",
+        "data": event.get("data") if isinstance(event.get("data"), dict) else {},
+    }
 
 
 # ---------------------------------------------------------------------------

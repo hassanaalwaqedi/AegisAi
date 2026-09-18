@@ -19,27 +19,27 @@ export function RiskSummary({ status, tracks, events, statistics }: RiskSummaryP
       <StatusCard
         label="Total detections"
         value={formatNumber(system.total_detections)}
-        detail="From /status"
+        detail="Current system activity"
         icon={ScanSearch}
       />
       <StatusCard
         label="Active tracks"
         value={formatNumber(tracks?.count ?? system.active_tracks)}
-        detail="From /tracks"
+        detail="Current tracked activity"
         icon={Users}
         tone="good"
       />
       <StatusCard
         label="High-risk alerts"
         value={formatNumber(system.high_risk_count ?? highRiskTracks)}
-        detail={events ? `${events.count} events returned` : "From /status or /tracks"}
+        detail={events ? `${events.count} recent alerts` : "Current alert activity"}
         icon={AlertTriangle}
         tone={highRiskTracks && highRiskTracks > 0 ? "danger" : "neutral"}
       />
       <StatusCard
         label="Crowd density"
         value={formatDecimal(getCrowdMetric(statistics, "max_density"), 1)}
-        detail="Max density from /statistics"
+        detail="Highest current crowd level"
         icon={Gauge}
         tone="warning"
       />

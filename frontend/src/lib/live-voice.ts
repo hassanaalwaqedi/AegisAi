@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { appConfig } from "@/lib/config";
 import { availabilitySchema } from "@/lib/intelligence-context";
+import { operatorExecutionSchema } from "@/lib/operator-api";
 
 export const voiceStateSchema = z.enum([
   "off",
@@ -71,7 +72,8 @@ export type LiveSession = z.infer<typeof liveSessionSchema>;
 
 export const serverVoiceEnvelopeSchema = z.object({
   version: z.literal("1.0"),
-  type: z.enum(["session_ready", "state", "transcript", "citations", "ui_command", "tool_activity", "turn_complete", "interrupted", "error", "pong"]),
+  type: z.enum(["session_ready", "state", "transcript", "citations", "ui_command", "tool_activity", "turn_complete", "interrupted", "error", "pong", "projection"]),
+  projection: operatorExecutionSchema.optional().nullable(),
   state: voiceStateSchema.optional(),
   sessionId: z.string().min(1).optional(),
   inputSampleRate: z.number().int().min(8000).max(48000).optional(),
@@ -170,9 +172,12 @@ function liveWebSocketBase() {
 
   const url = new URL(window.location.origin);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  // Local Next development is normally on :3000 while FastAPI is on :8080.
+  // Local Next development can choose any available port (for example 3001
+  // when 3000 is occupied), while FastAPI serves the Live gateway on 8080.
   // Deployed environments must configure NEXT_PUBLIC_AEGIS_LIVE_WS_URL.
-  if (url.port === "3000") url.port = "8080";
+  if (["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) && url.port !== "8080") {
+    url.port = "8080";
+  }
   return url.toString();
 }
 

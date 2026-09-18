@@ -55,33 +55,22 @@ export async function sendChatMessage(message: string): Promise<ChatResponse> {
   return res.json();
 }
 
-export async function fetchSystemMetrics(): Promise<SystemMetrics | null> {
-  try {
-    const res = await fetch(`${API_BASE}/api/ai/metrics`, { headers });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
-  }
+export async function fetchSystemMetrics(): Promise<SystemMetrics> {
+  const res = await fetch(`${API_BASE}/api/ai/metrics`, { headers, cache: "no-store" });
+  if (!res.ok) throw new Error(`AI metrics unavailable: ${res.status}`);
+  return res.json();
 }
 
 export async function fetchAISuggestions(): Promise<AISuggestion[]> {
-  try {
-    const res = await fetch(`${API_BASE}/api/ai/suggestions`, { headers });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.suggestions || [];
-  } catch {
-    return [];
-  }
+  const res = await fetch(`${API_BASE}/api/ai/suggestions`, { headers, cache: "no-store" });
+  if (!res.ok) throw new Error(`AI suggestions unavailable: ${res.status}`);
+  const data = await res.json();
+  if (!Array.isArray(data.suggestions)) throw new Error("AI suggestions response is invalid.");
+  return data.suggestions;
 }
 
-export async function fetchSystemContext(): Promise<any> {
-  try {
-    const res = await fetch(`${API_BASE}/api/ai/context`, { headers });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
-  }
+export async function fetchSystemContext(): Promise<unknown> {
+  const res = await fetch(`${API_BASE}/api/ai/context`, { headers, cache: "no-store" });
+  if (!res.ok) throw new Error(`AI context unavailable: ${res.status}`);
+  return res.json();
 }

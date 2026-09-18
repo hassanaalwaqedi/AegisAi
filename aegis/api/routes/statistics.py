@@ -9,8 +9,13 @@ Phase 4: Response & Productization Layer
 
 from fastapi import APIRouter
 from aegis.api.state import get_state
+from aegis.intelligence.event_access import load_persisted_event_records, merge_event_records
 
 router = APIRouter(prefix="/statistics", tags=["statistics"])
+
+
+def _is_risk_alert(event: dict) -> bool:
+    return str(event.get("type") or event.get("event_type") or "").lower() == "risk_alert"
 
 
 @router.get("")
@@ -24,16 +29,26 @@ async def get_statistics():
     state = get_state()
     stats = state.get_statistics()
     status = state.get_status()
-    events = state.get_events(limit=1000)
+    runtime_events = state.get_events(limit=1000)
+    try:
+        persisted_events = load_persisted_event_records(limit=500)
+    except Exception:
+        persisted_events = []
+    events = merge_event_records(persisted_events, runtime_events)
     registry = state.get_object_registry()
     alerts_by_severity = {"LOW": 0, "CANDIDATE_MEDIUM": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0}
     events_by_type = {}
     for event in events:
+        event_type = str(event.get("event_type") or "event")
+        events_by_type[event_type] = events_by_type.get(event_type, 0) + 1
+        # The chart is explicitly named "Alerts by severity". Ordinary
+        # detection/risk observations remain available in events_by_type but
+        # must not be represented as dispatched operator alerts.
+        if not _is_risk_alert(event):
+            continue
         level = event.get("risk_level") or event.get("severity")
         if level in alerts_by_severity:
             alerts_by_severity[level] += 1
-        event_type = str(event.get("event_type") or "event")
-        events_by_type[event_type] = events_by_type.get(event_type, 0) + 1
     
     return {
         "crowd": {

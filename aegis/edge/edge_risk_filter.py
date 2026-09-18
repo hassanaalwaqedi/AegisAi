@@ -19,6 +19,7 @@ Phase 6: Edge/Cloud Hybrid Intelligence
 
 import logging
 import time
+from io import BytesIO
 import numpy as np
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -274,11 +275,27 @@ class EdgeRiskFilter:
         Returns:
             SuspiciousEvent ready for cloud transmission
         """
-        # Compress frame to JPEG
+        # Compress frame to JPEG. OpenCV is preferred when present, but an
+        # edge process must not fail solely because that optional dependency
+        # is absent; Pillow creates the same real JPEG evidence bytes.
         quality = self._config.frame_compression_quality
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, quality]
-        _, jpeg_buffer = cv2.imencode('.jpg', frame, encode_params)
-        frame_jpeg = jpeg_buffer.tobytes()
+        try:
+            import cv2
+
+            success, jpeg_buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+            if not success:
+                raise RuntimeError("OpenCV JPEG encoding failed")
+            frame_jpeg = jpeg_buffer.tobytes()
+        except ImportError:
+            try:
+                from PIL import Image
+
+                image = Image.fromarray(frame[:, :, ::-1] if frame.ndim == 3 else frame)
+                output = BytesIO()
+                image.save(output, format="JPEG", quality=quality)
+                frame_jpeg = output.getvalue()
+            except ImportError as exc:
+                raise RuntimeError("No local JPEG encoder is available for edge evidence.") from exc
         
         h, w = frame.shape[:2]
         

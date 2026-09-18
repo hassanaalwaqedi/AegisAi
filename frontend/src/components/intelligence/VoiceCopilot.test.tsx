@@ -8,6 +8,7 @@ const testState = vi.hoisted(() => ({
     state: "off",
     error: null as string | null,
     waveformLevel: 0,
+    playbackLevel: 0,
     captureMode: null as "speech-recognition" | null,
     isCapturing: false,
     sessionActive: false,
@@ -53,7 +54,7 @@ const liveCapability = {
 beforeEach(() => {
   testState.fetchCapabilities.mockResolvedValue(liveCapability);
   Object.assign(testState.voice, {
-    state: "off", error: null, waveformLevel: 0, captureMode: null, isCapturing: false,
+    state: "off", error: null, waveformLevel: 0, playbackLevel: 0, captureMode: null, isCapturing: false,
     sessionActive: false, sessionPhase: "idle", sessionOutcome: null, sessionSecondsRemaining: 0,
   });
   Object.values(testState.voice).forEach((value) => {
@@ -81,6 +82,24 @@ describe("VoiceCopilot", () => {
     expect(testState.voice.startListening).toHaveBeenCalledTimes(1);
   });
 
+  it("reports real listening and audio levels to the cinematic operator", async () => {
+    testState.voice.state = "listening";
+    testState.voice.waveformLevel = 0.42;
+    testState.voice.isCapturing = true;
+    testState.voice.sessionActive = true;
+    const onActivity = vi.fn();
+
+    render(<VoiceCopilot contextAvailability="live" onActivity={onActivity} />);
+
+    await waitFor(() => expect(onActivity).toHaveBeenCalledWith({
+      state: "listening",
+      inputLevel: 0.42,
+      isCapturing: true,
+      outputLevel: 0,
+      sessionActive: true,
+    }));
+  });
+
   it("renders operator and Aegis transcripts with evidence citations", async () => {
     render(<VoiceCopilot contextAvailability="live" />);
     await waitFor(() => expect(testState.callbacks).toBeTruthy());
@@ -100,7 +119,7 @@ describe("VoiceCopilot", () => {
     testState.voice.state = "speaking";
     testState.voice.sessionActive = true;
     render(<VoiceCopilot contextAvailability="live" />);
-    await waitFor(() => expect(screen.getByText("Aegis speaking")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: /Stop listening/i })).toBeEnabled());
 
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     expect(testState.voice.stop).toHaveBeenCalledTimes(1);

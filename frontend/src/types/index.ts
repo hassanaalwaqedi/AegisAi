@@ -15,8 +15,19 @@ import type {
   cameraSourceTypeSchema,
   cameraWebSocketMessageSchema,
   cameraZoneOverlaySchema,
+  alertsResponseSchema,
+  alertCountResponseSchema,
+  evidenceRecordSchema,
+  incidentSchema,
+  incidentsResponseSchema,
+  operationalAlertSchema,
+  persistedEvidenceResponseSchema,
   semanticQueryResponseSchema,
   semanticResultsResponseSchema,
+  evidenceSearchRequestSchema,
+  evidenceSearchResponseSchema,
+  evidenceSearchStatusSchema,
+  evidenceSearchDetailSchema,
   statisticsResponseSchema,
   statusResponseSchema,
   statusSystemSchema,
@@ -45,9 +56,20 @@ export type Track = z.infer<typeof trackSchema>;
 export type TracksResponse = z.infer<typeof tracksResponseSchema>;
 export type RiskEvent = z.infer<typeof eventSchema>;
 export type EventsResponse = z.infer<typeof eventsResponseSchema>;
+export type OperationalAlert = z.infer<typeof operationalAlertSchema>;
+export type AlertsResponse = z.infer<typeof alertsResponseSchema>;
+export type AlertCountResponse = z.infer<typeof alertCountResponseSchema>;
+export type EvidenceRecord = z.infer<typeof evidenceRecordSchema>;
+export type PersistedEvidenceResponse = z.infer<typeof persistedEvidenceResponseSchema>;
+export type Incident = z.infer<typeof incidentSchema>;
+export type IncidentsResponse = z.infer<typeof incidentsResponseSchema>;
 export type StatisticsResponse = z.infer<typeof statisticsResponseSchema>;
 export type SemanticQueryResponse = z.infer<typeof semanticQueryResponseSchema>;
 export type SemanticResultsResponse = z.infer<typeof semanticResultsResponseSchema>;
+export type EvidenceSearchRequest = z.infer<typeof evidenceSearchRequestSchema>;
+export type EvidenceSearchResponse = z.infer<typeof evidenceSearchResponseSchema>;
+export type EvidenceSearchStatus = z.infer<typeof evidenceSearchStatusSchema>;
+export type EvidenceSearchDetail = z.infer<typeof evidenceSearchDetailSchema>;
 export type WebSocketMessage = z.infer<typeof websocketMessageSchema>;
 
 export type ApiConnectionState = "checking" | "connected" | "degraded" | "unavailable";

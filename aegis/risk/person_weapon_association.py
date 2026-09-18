@@ -31,8 +31,11 @@ class WeaponAssociation:
     iou: float
     center_distance: float
     normalized_distance: float
+    body_region: Optional[str]
     person_bbox: List[float]
     weapon_bbox: List[float]
+    person_model_source: Optional[str] = None
+    weapon_model_source: Optional[str] = None
     frame_id: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -48,8 +51,11 @@ class WeaponAssociation:
             "iou": round(self.iou, 4),
             "center_distance": round(self.center_distance, 2),
             "normalized_distance": round(self.normalized_distance, 3),
+            "body_region": self.body_region,
             "person_bbox": self.person_bbox,
             "weapon_bbox": self.weapon_bbox,
+            "person_model_source": self.person_model_source,
+            "weapon_model_source": self.weapon_model_source,
             "frame_id": self.frame_id,
         }
 
@@ -80,7 +86,7 @@ class PersonWeaponAssociationEngine:
             if best is None:
                 continue
 
-            person, association_type, score, iou, distance, normalized_distance = best
+            person, association_type, score, iou, distance, normalized_distance, body_region = best
             pair_key = (str(getattr(person, "track_id")), str(getattr(weapon, "track_id")))
             current_pairs.add(pair_key)
 
@@ -104,8 +110,11 @@ class PersonWeaponAssociationEngine:
                     iou=iou,
                     center_distance=distance,
                     normalized_distance=normalized_distance,
+                    body_region=body_region,
                     person_bbox=list(self._bbox(person)),
                     weapon_bbox=list(self._bbox(weapon)),
+                    person_model_source=str(getattr(person, "model_source", "") or "") or None,
+                    weapon_model_source=str(getattr(weapon, "model_source", "") or "") or None,
                     frame_id=frame_id,
                 )
             )
@@ -123,19 +132,21 @@ class PersonWeaponAssociationEngine:
         self,
         weapon: Any,
         persons: List[Any],
-    ) -> Optional[Tuple[Any, str, float, float, float, float]]:
+    ) -> Optional[Tuple[Any, str, float, float, float, float, Optional[str]]]:
         if not persons:
             return None
 
         weapon_bbox = self._bbox(weapon)
         weapon_center = self._center(weapon_bbox)
-        best: Optional[Tuple[Any, str, float, float, float, float]] = None
+        best: Optional[Tuple[Any, str, float, float, float, float, Optional[str]]] = None
 
         for person in persons:
             person_bbox = self._bbox(person)
             iou = self._iou(person_bbox, weapon_bbox)
             overlap_ratio = self._overlap_ratio(weapon_bbox, person_bbox)
             center_inside = self._point_inside(weapon_center, person_bbox)
+            upper_body_near = self._point_inside(weapon_center, self._expanded_upper_body(person_bbox))
+            body_region = self._body_region(weapon_center, person_bbox, upper_body_near)
             distance = self._distance(self._center(person_bbox), weapon_center)
             normalized_distance = distance / max(self._diagonal(person_bbox), 1.0)
 
@@ -147,12 +158,17 @@ class PersonWeaponAssociationEngine:
             elif iou >= self.overlap_threshold or overlap_ratio >= 0.25:
                 association_type = "overlap"
                 score = 0.78 + min(max(iou, overlap_ratio) * 0.30, 0.17)
+            elif upper_body_near:
+                # Pose is unavailable, so this is deliberately an approximate
+                # upper-body/arm reach region rather than a hand-contact claim.
+                association_type = "near"
+                score = max(0.62, 0.78 - normalized_distance * 0.28)
             elif normalized_distance <= self.near_distance_ratio:
                 association_type = "near"
                 score = max(0.35, 0.72 - normalized_distance * 0.35)
 
             score = max(0.0, min(score, 0.99))
-            candidate = (person, association_type, score, iou, distance, normalized_distance)
+            candidate = (person, association_type, score, iou, distance, normalized_distance, body_region)
             if best is None or candidate[2] > best[2]:
                 best = candidate
 
@@ -164,8 +180,9 @@ class PersonWeaponAssociationEngine:
 
     @staticmethod
     def _is_weapon(track: Any) -> bool:
-        class_name = str(getattr(track, "class_name", "")).lower()
-        return bool(getattr(track, "is_weapon", False)) or class_name in {"knife", "pistol"}
+        return bool(getattr(track, "is_weapon", False)) or str(
+            getattr(track, "object_category", "")
+        ).strip().lower() == "weapon"
 
     @staticmethod
     def _bbox(track: Any) -> BBox:
@@ -187,6 +204,30 @@ class PersonWeaponAssociationEngine:
     @staticmethod
     def _diagonal(bbox: BBox) -> float:
         return math.hypot(max(bbox[2] - bbox[0], 0.0), max(bbox[3] - bbox[1], 0.0))
+
+    @staticmethod
+    def _expanded_upper_body(bbox: BBox) -> BBox:
+        width = max(bbox[2] - bbox[0], 0.0)
+        height = max(bbox[3] - bbox[1], 0.0)
+        return (
+            bbox[0] - width * 0.25,
+            bbox[1] + height * 0.08,
+            bbox[2] + width * 0.25,
+            bbox[1] + height * 0.68,
+        )
+
+    @classmethod
+    def _body_region(
+        cls,
+        point: Tuple[float, float],
+        bbox: BBox,
+        upper_body_near: bool,
+    ) -> Optional[str]:
+        if upper_body_near:
+            return "upper_body"
+        if cls._point_inside(point, bbox):
+            return "body"
+        return None
 
     @staticmethod
     def _iou(a: BBox, b: BBox) -> float:

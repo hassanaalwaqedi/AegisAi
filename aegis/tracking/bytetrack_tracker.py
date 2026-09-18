@@ -72,7 +72,7 @@ class ByteTrackTracker(BaseTracker):
         else:
             self._activation_thresh = 0.25
             self._lost_buffer = 30
-            self._min_match = 0.8
+            self._min_match = 0.3
             self._fps = 30
 
         self._tracker = sv.ByteTrack(

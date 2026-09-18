@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -20,14 +21,20 @@ import numpy as np
 
 from aegis.api.state import get_state
 from aegis.camera.base import BaseCameraSource
+from aegis.camera.credentials import CredentialStorage, default_credential_storage
 from aegis.camera.factory import CameraSourceFactory
 from aegis.camera.registry import CameraRegistry
+from aegis.camera.sources import UnavailableCameraSource
 from aegis.camera.types import (
     CameraConfig,
     CameraConnectionStatus,
     CameraSourceType,
 )
-from aegis.camera.utils import decode_base64_frame, safe_camera_id
+from aegis.camera.utils import (
+    decode_base64_frame,
+    normalise_stream_identity,
+    safe_camera_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +99,11 @@ class MultiCameraPipelineManager:
         registry: Optional[CameraRegistry] = None,
         factory: Optional[CameraSourceFactory] = None,
         ingestion_service: Optional[Any] = None,
+        credential_storage: Optional[CredentialStorage] = None,
     ):
         self.registry = registry or CameraRegistry()
         self.factory = factory or CameraSourceFactory()
+        self.credential_storage = credential_storage or default_credential_storage()
 
         # Lazy import to avoid circular dependency
         if ingestion_service is not None:
@@ -114,13 +123,24 @@ class MultiCameraPipelineManager:
 
         for config in self.registry.list():
             try:
-                self._sources[config.camera_id] = self.factory.create(
-                    config,
+                runtime_config = self._hydrate_config(config, migrate_legacy=True)
+                source = self.factory.create(
+                    runtime_config,
                     on_frame=self._handle_frame,
                     on_status_change=self._handle_status_change,
                 )
+                self._sources[config.camera_id] = source
+                if not config.enabled:
+                    source._set_status(CameraConnectionStatus.STOPPED, "Disabled")
+                elif config.auto_start:
+                    source.start()
             except Exception as exc:
                 logger.error("Failed to restore camera %s: %s", config.camera_id, exc)
+                self._sources[config.camera_id] = UnavailableCameraSource(
+                    config,
+                    reason=f"Camera restore failed: {type(exc).__name__}",
+                    on_status_change=self._handle_status_change,
+                )
 
     def sources(self) -> Iterable[BaseCameraSource]:
         with self._lock:
@@ -131,22 +151,40 @@ class MultiCameraPipelineManager:
             return [self._camera_payload(source) for source in self._sources.values()]
 
     def create_camera(
-        self, config: CameraConfig, auto_start: bool = False
+        self,
+        config: CameraConfig,
+        auto_start: bool = False,
+        *,
+        connection_verified: bool = False,
+        connection_test: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         config.camera_id = safe_camera_id(config.camera_id)
-        source = self.factory.create(
-            config,
-            on_frame=self._handle_frame,
-            on_status_change=self._handle_status_change,
-        )
+        config.auto_start = bool(auto_start and config.enabled)
+        config.verification_status = "verified" if connection_verified else "unverified"
+        config.last_connection_test = dict(connection_test or {})
         with self._lock:
             if config.camera_id in self._sources:
                 raise ValueError(f"Camera {config.camera_id} already exists")
+            self._reject_duplicate_stream(config)
+            source = self.factory.create(
+                config,
+                on_frame=self._handle_frame,
+                on_status_change=self._handle_status_change,
+            )
+            self._store_stream_credential(config)
             self.registry.save(config)
             self._sources[config.camera_id] = source
         if auto_start and config.enabled:
             source.start()
-        return self._camera_payload(source)
+        payload = self._camera_payload(source)
+        payload["registration"] = {
+            "config_saved": True,
+            "connection_verified": connection_verified,
+            "processing_started": bool(auto_start and config.enabled),
+            "runtime_status": source.get_status().status.value,
+            "connection_state": self._connection_state(source),
+        }
+        return payload
 
     def update_camera(
         self, camera_id: str, changes: Dict[str, Any]
@@ -158,17 +196,23 @@ class MultiCameraPipelineManager:
         was_running = old_source.is_running if old_source else False
         if old_source:
             old_source.stop()
+        self._wait_for_processing(camera_id)
+        self._reset_ingestion_camera(camera_id)
 
-        data = existing.to_private_dict()
+        existing_runtime = self._hydrate_config(existing)
+        data = existing_runtime.to_private_dict()
         data.update({key: value for key, value in changes.items() if value is not None})
         data["camera_id"] = camera_id
         config = CameraConfig.from_dict(data)
+        config.auto_start = existing.auto_start
         source = self.factory.create(
             config,
             on_frame=self._handle_frame,
             on_status_change=self._handle_status_change,
         )
         with self._lock:
+            self._reject_duplicate_stream(config, exclude_camera_id=camera_id)
+            self._store_stream_credential(config)
             self.registry.save(config)
             self._sources[camera_id] = source
         if was_running:
@@ -181,6 +225,10 @@ class MultiCameraPipelineManager:
             deleted = self.registry.delete(camera_id)
         if source:
             source.stop()
+            if source.config.credential_ref:
+                self.credential_storage.delete(source.config.credential_ref)
+        self._wait_for_processing(camera_id)
+        self._reset_ingestion_camera(camera_id)
         return deleted or source is not None
 
     def get_source(self, camera_id: str) -> Optional[BaseCameraSource]:
@@ -203,7 +251,24 @@ class MultiCameraPipelineManager:
         if source is None:
             raise KeyError(camera_id)
         source.stop()
+        self._wait_for_processing(camera_id)
+        self._reset_ingestion_camera(camera_id)
         return self._camera_payload(source)
+
+    def _reset_ingestion_camera(self, camera_id: str) -> None:
+        reset = getattr(self.ingestion, "reset_camera", None)
+        if callable(reset):
+            reset(camera_id)
+
+    def _wait_for_processing(self, camera_id: str, timeout_seconds: float = 2.0) -> None:
+        """Give the one coalesced in-flight frame a chance to finish cleanly."""
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            with self._lock:
+                if not self._processing.get(camera_id, False):
+                    return
+            time.sleep(0.01)
+        logger.warning("Timed out waiting for in-flight frame camera_id=%s", camera_id)
 
     def get_status(self, camera_id: str) -> Dict[str, Any]:
         source = self.get_source(camera_id)
@@ -227,7 +292,7 @@ class MultiCameraPipelineManager:
             raise ValueError("camera_id is not a BROWSER_WEBCAM source")
         frame = decode_base64_frame(base64_frame)
         source.ingest_frame(frame, notify_pipeline=False)
-        return self.ingestion.process_frame(camera_id, frame, source.config.metadata)
+        return self.ingestion.process_frame(camera_id, frame, self._evidence_metadata(source))
 
     def process_uploaded_video(
         self,
@@ -278,22 +343,39 @@ class MultiCameraPipelineManager:
         def run() -> None:
             try:
                 source = self.get_source(camera_id)
-                metadata = source.config.metadata if source else None
+                metadata = self._evidence_metadata(source) if source else None
                 self.ingestion.process_frame(camera_id, frame, metadata)
             except Exception as exc:
                 source = self.get_source(camera_id)
-                if source:
+                # Stop/update can legitimately clear ingestion state while an
+                # already-submitted worker unwinds.  Do not relabel that
+                # stopped source as an operational camera error.
+                if source and source.is_running:
                     source._set_status(
                         CameraConnectionStatus.ERROR,
                         f"Frame processing failed: {exc}",
                     )
-                logger.exception(
-                    "Frame processing failed for camera %s", camera_id
-                )
+                    logger.exception(
+                        "Frame processing failed for camera %s", camera_id
+                    )
+                else:
+                    logger.info(
+                        "Ignoring frame-processing error after camera lifecycle change camera_id=%s error=%s",
+                        camera_id,
+                        type(exc).__name__,
+                    )
             finally:
                 self._processing[camera_id] = False
 
         self._executor.submit(run)
+
+    @staticmethod
+    def _evidence_metadata(source: BaseCameraSource) -> Dict[str, Any]:
+        """Attach display metadata for evidence without mutating camera config."""
+        metadata = dict(source.config.metadata or {})
+        if source.config.name:
+            metadata.setdefault("camera_name", source.config.name)
+        return metadata
 
     def _handle_status_change(
         self,
@@ -311,8 +393,77 @@ class MultiCameraPipelineManager:
             }
         )
 
+    @staticmethod
+    def _is_remote_stream(config: CameraConfig) -> bool:
+        return config.source_type in {
+            CameraSourceType.RTSP_STREAM,
+            CameraSourceType.HTTP_STREAM,
+        }
+
+    def _reject_duplicate_stream(
+        self, config: CameraConfig, *, exclude_camera_id: Optional[str] = None
+    ) -> None:
+        if not self._is_remote_stream(config):
+            return
+        stream_identity = normalise_stream_identity(config.url)
+        if not stream_identity:
+            return
+        config.stream_identity = stream_identity
+        for existing in self.registry.list():
+            if existing.camera_id == exclude_camera_id:
+                continue
+            existing_identity = existing.stream_identity or normalise_stream_identity(
+                existing.url
+            )
+            if existing_identity == stream_identity:
+                raise ValueError(
+                    "A camera is already registered for this stream endpoint "
+                    f"({stream_identity})."
+                )
+
+    def _store_stream_credential(self, config: CameraConfig) -> None:
+        if not self._is_remote_stream(config) or not config.url:
+            return
+        credential_ref = config.credential_ref or f"camera-{config.camera_id}-{uuid.uuid4().hex}"
+        self.credential_storage.save(credential_ref, config.url)
+        config.credential_ref = credential_ref
+
+    def _hydrate_config(
+        self, config: CameraConfig, *, migrate_legacy: bool = False
+    ) -> CameraConfig:
+        """Resolve a runtime URL without keeping raw credentials in cameras.json."""
+        if not self._is_remote_stream(config):
+            return config
+        if config.credential_ref:
+            secret = self.credential_storage.get(config.credential_ref)
+            if not secret:
+                raise RuntimeError("Camera credential is unavailable")
+            config.url = secret
+            return config
+        if not config.url:
+            raise RuntimeError("Camera stream URL is unavailable")
+        # One-time compatibility migration for configurations created before
+        # V2.  Production mode is guarded by the credential provider.
+        if migrate_legacy:
+            self._store_stream_credential(config)
+            self.registry.save(config)
+        return config
+
+    @staticmethod
+    def _connection_state(source: BaseCameraSource) -> str:
+        if not source.config.enabled:
+            return "disabled"
+        runtime = source.get_status().status.value
+        if runtime == CameraConnectionStatus.ERROR.value:
+            return "failed"
+        if runtime == CameraConnectionStatus.OFFLINE.value and source.config.verification_status != "verified":
+            return "unverified"
+        return runtime
+
     def _camera_payload(self, source: BaseCameraSource) -> Dict[str, Any]:
-        return {
+        payload = {
             **source.config.to_public_dict(),
             "runtime": source.get_status().to_dict(),
         }
+        payload["connection_state"] = self._connection_state(source)
+        return payload

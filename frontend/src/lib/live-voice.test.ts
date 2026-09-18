@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { aegisVoiceCoreStateSchema, liveCapabilitiesSchema, safeUiCommandSchema, serverVoiceEnvelopeSchema, voiceStateSchema } from "./live-voice";
+import { aegisVoiceCoreStateSchema, liveCapabilitiesSchema, liveWebSocketUrl, safeUiCommandSchema, serverVoiceEnvelopeSchema, voiceStateSchema } from "./live-voice";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
 
 describe("Gemini Live browser contracts", () => {
   it("supports only the explicit VoiceState transitions", () => {
@@ -29,5 +34,13 @@ describe("Gemini Live browser contracts", () => {
     expect(serverVoiceEnvelopeSchema.safeParse({ version: "1.0", type: "tool_activity", tool: "get_live_camera_status", toolStatus: "calling", turnId: "turn-1" }).success).toBe(true);
     expect(serverVoiceEnvelopeSchema.safeParse({ version: "1.0", type: "interrupted", turnId: "turn-1" }).success).toBe(true);
     expect(serverVoiceEnvelopeSchema.safeParse({ version: "1.0", type: "audio", data: "base64" }).success).toBe(false);
+  });
+
+  it("connects local Next development ports to the FastAPI Live WebSocket", () => {
+    vi.stubEnv("NEXT_PUBLIC_AEGIS_LIVE_WS_URL", "");
+    vi.stubEnv("NEXT_PUBLIC_WS_URL", "");
+    vi.stubGlobal("window", { location: { origin: "http://localhost:3001" } });
+
+    expect(liveWebSocketUrl("voice-session")).toBe("ws://localhost:8080/ws/intelligence/live/voice-session");
   });
 });

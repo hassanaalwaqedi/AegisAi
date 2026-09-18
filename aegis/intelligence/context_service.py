@@ -4,8 +4,10 @@ The live operational data path is intentionally explicit:
 
 ``MultiCameraPipelineManager -> FrameIngestionService -> APIState``.
 
-Durable event writes on that path use ``aegis.database``.  The legacy
-``aegis.db`` models/repositories are not queried or combined here.
+Confirmed high-risk events are also written durably through
+``aegis.database``.  The context reads a normalized, read-only projection of
+that evidence and merges it with the current runtime buffer by public event
+ID, so a process restart never hides operator evidence from Intelligence.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from aegis.intelligence.context_schemas import (
     TrackItem,
     VoiceCapability,
 )
+from aegis.intelligence.event_access import load_persisted_event_records, merge_event_records
 
 
 REFRESH_AFTER_SECONDS = 10
@@ -45,6 +48,8 @@ TRACK_STALE_AFTER_SECONDS = 15
 STATISTICS_STALE_AFTER_SECONDS = 20
 EVENT_STALE_AFTER_SECONDS = 60
 MAX_CONTEXT_EVENTS = 20
+MAX_RUNTIME_EVENTS = 100
+MAX_CONTEXT_ALERTS = 50
 MAX_CONTEXT_TRACKS = 20
 
 
@@ -99,6 +104,22 @@ def _default_settings_getter() -> Any:
     from aegis.settings import get_settings
 
     return get_settings()
+
+
+def _default_incident_snapshot_getter(observed_at: datetime) -> Tuple[int, Optional[str]]:
+    """Read the durable incident count and resolve only genuinely idle records."""
+    from aegis.database.connection import get_db_session
+    from aegis.database.repositories import IncidentRepository
+    from aegis.intelligence.incident_correlation import IncidentCorrelationService
+
+    with get_db_session() as session:
+        IncidentCorrelationService(session).resolve_expired(now=observed_at)
+        return IncidentRepository(session).active_count(), None
+
+
+def _default_durable_events_getter(limit: int) -> List[Dict[str, Any]]:
+    """Return safe persisted evidence records without exposing a DB session."""
+    return load_persisted_event_records(limit=limit)
 
 
 def _as_datetime(value: Any) -> Optional[datetime]:
@@ -253,6 +274,8 @@ class IntelligenceContextService:
         persistence_status_getter: Callable[[], Any] = _default_persistence_status_getter,
         persistence_readiness_check: Callable[[], Tuple[bool, Optional[str]]] = _default_persistence_readiness_check,
         settings_getter: Callable[[], Any] = _default_settings_getter,
+        incident_snapshot_getter: Callable[[datetime], Tuple[int, Optional[str]]] = _default_incident_snapshot_getter,
+        durable_events_getter: Callable[[int], Sequence[Dict[str, Any]]] = _default_durable_events_getter,
         now: Callable[[], datetime] = _utcnow,
     ) -> None:
         self._state_getter = state_getter
@@ -263,6 +286,8 @@ class IntelligenceContextService:
         self._persistence_status_getter = persistence_status_getter
         self._persistence_readiness_check = persistence_readiness_check
         self._settings_getter = settings_getter
+        self._incident_snapshot_getter = incident_snapshot_getter
+        self._durable_events_getter = durable_events_getter
         self._now = now
 
     def build(self) -> IntelligenceContext:
@@ -275,11 +300,12 @@ class IntelligenceContextService:
             observed_at, evidence_validator
         )
         semantic, semantic_reasons = self._collect_semantic(observed_at)
+        incidents, incident_reasons = self._collect_incidents(observed_at)
         suggestions = self._build_suggestions(cameras, alerts, evidence_validator)
         ai, ai_reasons = self._collect_ai(evidence_validator)
 
         reasons = self._deduplicate(
-            [*check_reasons, *camera_reasons, *runtime_reasons, *semantic_reasons, *ai_reasons]
+            [*check_reasons, *camera_reasons, *runtime_reasons, *semantic_reasons, *incident_reasons, *ai_reasons]
         )
         overall = OverallContext(
             status=self._overall_status(checks, cameras, alerts, tracks, detections, semantic, ai),
@@ -294,11 +320,7 @@ class IntelligenceContextService:
             overall=overall,
             cameras=cameras,
             alerts=alerts,
-            incidents=IncidentsCapability(
-                capability=Availability.UNAVAILABLE,
-                reason="Incident management is not implemented; risk alerts are not incidents.",
-                active_count=None,
-            ),
+            incidents=incidents,
             events=events,
             tracks=tracks,
             detections=detections,
@@ -311,6 +333,40 @@ class IntelligenceContextService:
     def _normalized_now(self) -> datetime:
         value = self._now()
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    def _collect_incidents(
+        self, observed_at: datetime
+    ) -> Tuple[IncidentsCapability, List[str]]:
+        try:
+            active_count, reason = self._incident_snapshot_getter(observed_at)
+            if active_count is None:
+                detail = reason or "Durable incident correlation returned no active-count value."
+                return (
+                    IncidentsCapability(
+                        capability=Availability.UNAVAILABLE,
+                        reason=detail,
+                        active_count=None,
+                    ),
+                    [detail],
+                )
+            return (
+                IncidentsCapability(
+                    capability=Availability.LIVE,
+                    reason=reason,
+                    active_count=int(active_count),
+                ),
+                [],
+            )
+        except Exception as exc:
+            detail = f"Durable incident correlation is unavailable: {type(exc).__name__}."
+            return (
+                IncidentsCapability(
+                    capability=Availability.UNAVAILABLE,
+                    reason=detail,
+                    active_count=None,
+                ),
+                [detail],
+            )
 
     def _collect_health_checks(
         self, observed_at: datetime
@@ -775,27 +831,43 @@ class IntelligenceContextService:
     def _collect_runtime_data(
         self, observed_at: datetime, evidence_validator: _EvidenceValidator
     ) -> Tuple[List[EventItem], AlertsContext, List[TrackItem], DetectionSummary, List[str]]:
+        runtime_reasons: List[str] = []
+        raw_runtime_events: List[Dict[str, Any]] = []
+        runtime_available = True
         try:
             state = self._state_getter()
-            raw_events = state.get_events(limit=MAX_CONTEXT_EVENTS)
-            if not isinstance(raw_events, list):
+            raw_runtime_events = state.get_events(limit=MAX_RUNTIME_EVENTS)
+            if not isinstance(raw_runtime_events, list):
                 raise TypeError("Runtime event state returned a non-list payload")
-            evidence_validator.register_events(raw_events)
-            events = self._event_items(raw_events, observed_at, evidence_validator)
-            alert_items = self._risk_alert_items(raw_events, observed_at, evidence_validator)
-            alerts = AlertsContext(
-                active_count=len(alert_items),
-                items=alert_items,
-                freshness=self._alert_collection_freshness(alert_items, observed_at),
-            )
         except Exception as exc:
+            runtime_available = False
             detail = f"Live event state is unavailable: {exc}"
-            event_freshness = self._freshness(observed_at, Availability.UNAVAILABLE, detail)
-            events = []
-            alerts = AlertsContext(active_count=None, items=[], freshness=event_freshness)
-            runtime_reasons = [detail]
-        else:
-            runtime_reasons = []
+            runtime_reasons.append(detail)
+
+        durable_events: List[Dict[str, Any]] = []
+        durable_available = True
+        try:
+            candidate_events = self._durable_events_getter(MAX_RUNTIME_EVENTS)
+            if not isinstance(candidate_events, Sequence):
+                raise TypeError("Durable event reader returned a non-sequence payload")
+            durable_events = [dict(item) for item in candidate_events if isinstance(item, dict)]
+        except Exception as exc:
+            durable_available = False
+            runtime_reasons.append(f"Durable risk evidence is unavailable: {type(exc).__name__}.")
+
+        raw_events = merge_event_records(durable_events, raw_runtime_events)
+        evidence_validator.register_events(raw_events)
+        events = self._event_items(raw_events, observed_at, evidence_validator)
+        alert_items = self._risk_alert_items(raw_events, observed_at, evidence_validator)
+        alerts = AlertsContext(
+            active_count=len(alert_items),
+            items=alert_items,
+            freshness=self._alert_collection_freshness(
+                generated_at=observed_at,
+                durable_available=durable_available,
+                runtime_available=runtime_available,
+            ),
+        )
 
         try:
             state = self._state_getter()
@@ -895,7 +967,7 @@ class IntelligenceContextService:
         evidence_validator: _EvidenceValidator,
     ) -> List[RiskAlertItem]:
         alerts: List[RiskAlertItem] = []
-        for raw in reversed(raw_events[-MAX_CONTEXT_EVENTS:]):
+        for raw in reversed(raw_events):
             if not isinstance(raw, dict) or not self._is_risk_alert(raw):
                 continue
             alert_id = _string(raw.get("event_id")) or _string(raw.get("id"))
@@ -912,25 +984,44 @@ class IntelligenceContextService:
                 label="runtime risk alert",
                 is_risk_alert=True,
             )
-            alerts.append(
-                RiskAlertItem(
-                    alert_id=alert_id,
-                    level=_string(raw.get("risk_level")) or _string(raw.get("severity")),
-                    acknowledged=acknowledged if isinstance(acknowledged, bool) else None,
-                    evidence=[evidence] if evidence else [],
-                    freshness=self._activity_freshness(timestamp, generated_at, "Risk alert"),
-                )
+            item = RiskAlertItem(
+                alert_id=alert_id,
+                level=_string(raw.get("risk_level")) or _string(raw.get("severity")),
+                acknowledged=acknowledged if isinstance(acknowledged, bool) else None,
+                evidence=[evidence] if evidence else [],
+                freshness=self._activity_freshness(timestamp, generated_at, "Risk alert"),
             )
+            # A stale record remains available through recent event history and
+            # durable evidence, but must never be represented as an active
+            # operator alert or trigger an audible announcement.
+            if item.acknowledged is not True and item.freshness.status == Availability.LIVE:
+                alerts.append(item)
+            if len(alerts) >= MAX_CONTEXT_ALERTS:
+                break
         return alerts
 
     def _alert_collection_freshness(
-        self, alerts: Sequence[RiskAlertItem], generated_at: datetime
+        self,
+        *,
+        generated_at: datetime,
+        durable_available: bool,
+        runtime_available: bool,
     ) -> Freshness:
-        """Keep the alert summary as fresh as its newest source record."""
-        if not alerts:
-            # The empty result is a real, freshly queried buffer state.
+        """Describe source-query freshness, not the age of historical alerts."""
+        if durable_available and runtime_available:
             return self._freshness(generated_at, Availability.LIVE, expires=True)
-        return max(alerts, key=lambda item: item.freshness.observed_at).freshness
+        if durable_available or runtime_available:
+            return self._freshness(
+                generated_at,
+                Availability.DEGRADED,
+                "One alert source is unavailable; the result is partial.",
+                expires=True,
+            )
+        return self._freshness(
+            generated_at,
+            Availability.UNAVAILABLE,
+            "Live and durable alert sources are unavailable.",
+        )
 
     def _activity_freshness(
         self,

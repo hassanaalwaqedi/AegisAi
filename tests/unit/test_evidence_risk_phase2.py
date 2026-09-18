@@ -93,7 +93,7 @@ def test_knife_near_person_becomes_high_after_temporal_confirmation():
     assert "WEAPON_NEAR_PERSON_STABLE" in evidence["reason_codes"]
 
 
-def test_stable_contained_weapon_association_becomes_critical():
+def test_stable_contained_weapon_association_is_high_not_critical_without_interaction():
     person = _track(20, "person", (100, 100, 260, 360), is_person=True)
     knife = _track(21, "knife", (150, 170, 180, 220), confidence=0.95, is_weapon=True)
     engine = PersonWeaponAssociationEngine()
@@ -106,9 +106,11 @@ def test_stable_contained_weapon_association_becomes_critical():
 
     assert association["association_type"] == "contained"
     assert association["stable_frames"] == 3
-    assert evidence["risk_level"] == "CRITICAL"
-    assert evidence["verification_status"] == "critical"
+    assert evidence["risk_level"] == "HIGH"
+    assert evidence["verification_status"] == "confirmed"
     assert "STABLE_WEAPON_PERSON_ASSOCIATION" in evidence["reason_codes"]
+    assert "INTERACTION_CONFIRMATION_REQUIRED" in evidence["reason_codes"]
+    assert "CRITICAL_WEAPON_AGGRESSION_COMBINATION" not in evidence["reason_codes"]
     assert "holding" not in evidence["explanation"].lower()
 
 

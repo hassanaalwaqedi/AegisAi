@@ -12,14 +12,29 @@ Endpoints:
 Copyright 2024 AegisAI Project
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, status
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 
 from aegis.core.mode_manager import get_current_mode, SystemMode, is_restaurant_mode
 from aegis.api.security import verify_api_key
 
-router = APIRouter(prefix="/operations", tags=["operations"])
+def verified_operations_data_required() -> None:
+    """Block legacy operations routes until they are backed by real data."""
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "code": "verified_data_unavailable",
+            "message": "Operations metrics are disabled because this deployment has no verified operations data source.",
+        },
+    )
+
+
+router = APIRouter(
+    prefix="/operations",
+    tags=["operations"],
+    dependencies=[Depends(verified_operations_data_required)],
+)
 
 
 def require_restaurant_mode():

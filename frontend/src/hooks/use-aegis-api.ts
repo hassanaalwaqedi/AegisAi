@@ -6,9 +6,16 @@ import { aegisApiClient, type CameraUpdateInput } from "@/lib/api-client";
 export const queryKeys = {
   status: ["status"] as const,
   events: ["events"] as const,
+  alerts: ["alerts"] as const,
+  alertCount: ["alert-count"] as const,
+  incidents: ["incidents"] as const,
+  evidence: ["persisted-evidence"] as const,
   tracks: ["tracks"] as const,
   statistics: ["statistics"] as const,
   semanticResults: ["semantic-results"] as const,
+  evidenceSearchStatus: ["evidence-search-status"] as const,
+  evidenceSearch: (request: unknown) => ["evidence-search", request] as const,
+  evidenceSearchDetail: (eventId: string) => ["evidence-search-detail", eventId] as const,
   cameras: ["cameras"] as const,
   cameraEvents: (cameraId: string) => ["camera-events", cameraId] as const,
   cameraDetections: (cameraId: string) => ["camera-detections", cameraId] as const,
@@ -26,6 +33,38 @@ export function useEventsQuery() {
   return useQuery({
     queryKey: queryKeys.events,
     queryFn: () => aegisApiClient.getEvents()
+  });
+}
+
+export function useAlertsQuery(activeOnly = false, limit?: number) {
+  return useQuery({
+    queryKey: [...queryKeys.alerts, activeOnly ? "active" : "all", limit ?? "default"],
+    queryFn: () => aegisApiClient.getAlerts(activeOnly, limit),
+    refetchInterval: 3000
+  });
+}
+
+export function useAlertCountQuery() {
+  return useQuery({
+    queryKey: queryKeys.alertCount,
+    queryFn: () => aegisApiClient.getAlertCount(),
+    refetchInterval: 3000
+  });
+}
+
+export function useIncidentsQuery() {
+  return useQuery({
+    queryKey: queryKeys.incidents,
+    queryFn: () => aegisApiClient.getIncidents(),
+    refetchInterval: 5000
+  });
+}
+
+export function usePersistedEvidenceQuery() {
+  return useQuery({
+    queryKey: queryKeys.evidence,
+    queryFn: () => aegisApiClient.getPersistedEvidence(),
+    refetchInterval: 5000
   });
 }
 
@@ -50,6 +89,18 @@ export function useSemanticResultsQuery() {
     queryFn: () => aegisApiClient.getSemanticResults(),
     refetchInterval: 5000
   });
+}
+
+export function useEvidenceSearchStatusQuery() {
+  return useQuery({ queryKey: queryKeys.evidenceSearchStatus, queryFn: () => aegisApiClient.getEvidenceSearchStatus(), refetchInterval: 10000 });
+}
+
+export function useEvidenceSearchQuery(request: Parameters<typeof aegisApiClient.searchEvidence>[0], enabled: boolean) {
+  return useQuery({ queryKey: queryKeys.evidenceSearch(request), queryFn: () => aegisApiClient.searchEvidence(request), enabled, staleTime: 0 });
+}
+
+export function useEvidenceSearchDetailQuery(eventId: string | null) {
+  return useQuery({ queryKey: queryKeys.evidenceSearchDetail(eventId ?? "none"), queryFn: () => aegisApiClient.getEvidenceSearchDetail(eventId!), enabled: Boolean(eventId) });
 }
 
 export function useSemanticQueryMutation() {
@@ -179,6 +230,9 @@ export function useBrowserFrameMutation() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.cameraDetections(variables.cameraId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.tracks });
       void queryClient.invalidateQueries({ queryKey: queryKeys.events });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.alerts });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.incidents });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.evidence });
       void queryClient.invalidateQueries({ queryKey: queryKeys.statistics });
     }
   });

@@ -18,6 +18,7 @@ services:
       - ./ssl:/etc/nginx/ssl:ro
     depends_on:
       - aegisai
+      - frontend
     restart: unless-stopped
     networks:
       - aegis-network
@@ -38,9 +39,9 @@ services:
     environment:
       - AEGIS_API_HOST=0.0.0.0
       - AEGIS_API_PORT=8080
-      - AEGIS_API_KEY=${AEGIS_API_KEY:-change-me-in-production}
+      - AEGIS_API_KEY=${AEGIS_API_KEY:?AEGIS_API_KEY must be set}
       - AEGIS_DEBUG=false
-      - DATABASE_URL=sqlite:///app/data/aegis.db
+      - DATABASE_URL=sqlite:////app/data/aegis.db
     volumes:
       - aegis-data:/app/data
       - aegis-models:/app/models
@@ -50,11 +51,28 @@ services:
     networks:
       - aegis-network
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8080/status" ]
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')" ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: aegis-frontend
+    environment:
+      - NODE_ENV=production
+      - AEGIS_API_URL=http://aegisai:8080
+      - AEGIS_API_KEY=${AEGIS_API_KEY:?AEGIS_API_KEY must be set}
+    expose:
+      - "3000"
+    restart: unless-stopped
+    networks:
+      - aegis-network
+    depends_on:
+      - aegisai
   # ===========================================
   # PostgreSQL (optional - for production scale)
   # ===========================================

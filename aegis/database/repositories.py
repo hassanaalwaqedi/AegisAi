@@ -4,16 +4,18 @@ AegisAI - Database Repository Layer
 Repository pattern for database operations.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
+from sqlalchemy.exc import IntegrityError
 
 from .models import (
     Event, Alert, TrackStats, BehavioralSession, BehaviorEvent,
     BehaviorEmbedding, TelemetrySpan, TelemetryMetric, Anomaly,
     SmartAlertRecord, NLQQuery, InsightRecord, ConsentRecord,
-    SystemKnowledge, SystemKnowledgeAudit,
+    SystemKnowledge, SystemKnowledgeAudit, Incident, OperationalAlert, AuditLog,
+    Observation, RiskAssessment,
 )
 
 
@@ -72,12 +74,23 @@ class SystemKnowledgeRepository:
 
 
 class EventRepository:
-    """Repository for Event operations."""
+    """Repository for the active SQLAlchemy durable-event path."""
     
     def __init__(self, db: Session):
         self.db = db
     
     def create(self, event_type: str, message: str, **kwargs) -> Event:
+        event_id = kwargs.get("event_id")
+        if event_id:
+            evidence_kwargs = dict(kwargs)
+            evidence_kwargs.pop("event_id", None)
+            event, _ = self.create_or_get_evidence(
+                event_id=str(event_id),
+                event_type=event_type,
+                message=message,
+                **evidence_kwargs,
+            )
+            return event
         event = Event(
             event_type=event_type,
             timestamp=kwargs.get("timestamp", datetime.utcnow()),
@@ -92,6 +105,60 @@ class EventRepository:
         self.db.add(event)
         self.db.flush()
         return event
+
+    def create_or_get_evidence(self, *, event_id: str, event_type: str, message: str, **kwargs) -> tuple[Event, bool]:
+        """Create one durable evidence record per public event identifier.
+
+        The alert manager already controls alert cooldowns.  This extra
+        database-level identity guard protects against repeated delivery or a
+        retry racing with the first write without changing that alert logic.
+        """
+        normalized_event_id = str(event_id).strip()
+        if not normalized_event_id:
+            raise ValueError("A durable evidence record requires an event_id")
+
+        existing = self.get_by_event_id(normalized_event_id)
+        if existing is not None:
+            return existing, False
+
+        event = Event(
+            event_id=normalized_event_id,
+            alert_id=kwargs.get("alert_id"),
+            incident_id=kwargs.get("incident_id"),
+            event_type=event_type,
+            timestamp=kwargs.get("timestamp", datetime.utcnow()),
+            message=message,
+            reason=kwargs.get("reason") or message,
+            track_id=kwargs.get("track_id"),
+            track_key=kwargs.get("track_key"),
+            camera_id=kwargs.get("camera_id"),
+            camera_name=kwargs.get("camera_name"),
+            object_class=kwargs.get("object_class"),
+            risk_level=kwargs.get("risk_level"),
+            risk_score=kwargs.get("risk_score"),
+            factors=kwargs.get("factors") or [],
+            zone=kwargs.get("zone"),
+            zone_id=kwargs.get("zone_id"),
+            zone_name=kwargs.get("zone_name"),
+            bounding_box=kwargs.get("bounding_box"),
+            snapshot_path=kwargs.get("snapshot_path"),
+            snapshot_status=kwargs.get("snapshot_status") or "unavailable",
+            clip_path=kwargs.get("clip_path"),
+            event_metadata=kwargs.get("metadata"),
+        )
+
+        try:
+            # A savepoint keeps the caller's transaction usable when two
+            # workers race to write the same externally assigned event ID.
+            with self.db.begin_nested():
+                self.db.add(event)
+                self.db.flush()
+            return event, True
+        except IntegrityError:
+            existing = self.get_by_event_id(normalized_event_id)
+            if existing is not None:
+                return existing, False
+            raise
     
     def get_recent(self, limit: int = 50) -> List[Event]:
         return self.db.query(Event).order_by(desc(Event.timestamp)).limit(limit).all()
@@ -99,6 +166,354 @@ class EventRepository:
     def get_by_risk_level(self, level: str, limit: int = 50) -> List[Event]:
         return self.db.query(Event).filter(Event.risk_level == level)\
             .order_by(desc(Event.timestamp)).limit(limit).all()
+
+    def get_by_event_id(self, event_id: str) -> Optional[Event]:
+        return self.db.query(Event).filter(Event.event_id == event_id).one_or_none()
+
+    def get_by_alert_id(self, alert_id: str) -> Optional[Event]:
+        return self.db.query(Event).filter(Event.alert_id == alert_id).order_by(desc(Event.timestamp)).first()
+
+    def get_recent_evidence(self, limit: int = 50, risk_level: Optional[str] = None) -> List[Event]:
+        query = self.db.query(Event).filter(Event.event_id.isnot(None))
+        if risk_level:
+            query = query.filter(Event.risk_level == risk_level.upper())
+        return query.order_by(desc(Event.timestamp)).limit(limit).all()
+
+    def get_by_incident_id(self, incident_id: str) -> List[Event]:
+        return self.db.query(Event).filter(
+            Event.incident_id == incident_id,
+        ).order_by(Event.timestamp.asc(), Event.id.asc()).all()
+
+
+class ObservationRepository:
+    """Append-only persistence for camera observations.
+
+    Callers provide a deterministic observation ID so replay and retries are
+    idempotent.  This repository intentionally has no risk-scoring behavior.
+    """
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create_or_get(self, *, observation_id: str, **kwargs) -> tuple[Observation, bool]:
+        normalized_id = str(observation_id).strip()
+        if not normalized_id:
+            raise ValueError("An observation requires an observation_id")
+        existing = self.get_by_observation_id(normalized_id)
+        if existing is not None:
+            return existing, False
+
+        observation = Observation(
+            observation_id=normalized_id,
+            schema_version=str(kwargs.get("schema_version") or "1.0"),
+            camera_id=str(kwargs["camera_id"]),
+            source_epoch=str(kwargs["source_epoch"]),
+            captured_at=kwargs["captured_at"],
+            frame_id=int(kwargs["frame_id"]),
+            track_key=kwargs.get("track_key"),
+            related_track_key=kwargs.get("related_track_key"),
+            observation_type=str(kwargs["observation_type"]),
+            label=str(kwargs["label"]),
+            model_confidence=kwargs.get("model_confidence"),
+            bounding_box=kwargs.get("bounding_box"),
+            zone_id=kwargs.get("zone_id"),
+            zone_name=kwargs.get("zone_name"),
+            event_id=kwargs.get("event_id"),
+            observation_metadata=dict(kwargs.get("metadata") or {}),
+        )
+        try:
+            with self.db.begin_nested():
+                self.db.add(observation)
+                self.db.flush()
+            return observation, True
+        except IntegrityError:
+            existing = self.get_by_observation_id(normalized_id)
+            if existing is not None:
+                return existing, False
+            raise
+
+    def get_by_observation_id(self, observation_id: str) -> Optional[Observation]:
+        return self.db.query(Observation).filter(
+            Observation.observation_id == observation_id,
+        ).one_or_none()
+
+    def list_for_event(self, event_id: str) -> List[Observation]:
+        return self.db.query(Observation).filter(
+            Observation.event_id == event_id,
+        ).order_by(Observation.captured_at.asc(), Observation.id.asc()).all()
+
+    def list_for_track(self, track_key: str, *, limit: int = 200) -> List[Observation]:
+        return self.db.query(Observation).filter(
+            Observation.track_key == track_key,
+        ).order_by(desc(Observation.captured_at), desc(Observation.id)).limit(limit).all()
+
+    def attach_to_event(self, observation_ids: List[str], event_id: str) -> int:
+        """Link already-committed observations to their derived event.
+
+        Observations remain valid evidence if event creation fails; this link
+        is intentionally additive rather than a prerequisite for capture.
+        """
+        identifiers = [str(value).strip() for value in observation_ids if str(value).strip()]
+        if not identifiers or not event_id:
+            return 0
+        return self.db.query(Observation).filter(
+            Observation.observation_id.in_(identifiers),
+        ).update(
+            {Observation.event_id: str(event_id)},
+            synchronize_session=False,
+        )
+
+
+class RiskAssessmentRepository:
+    """Persistence boundary for versioned incident risk assessments."""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create_or_get(self, *, assessment_id: str, **kwargs) -> tuple[RiskAssessment, bool]:
+        existing = self.db.query(RiskAssessment).filter(
+            RiskAssessment.assessment_id == str(assessment_id),
+        ).one_or_none()
+        if existing is not None:
+            return existing, False
+        record = RiskAssessment(
+            assessment_id=str(assessment_id),
+            schema_version=str(kwargs.get("schema_version") or "1.0"),
+            policy_version=str(kwargs["policy_version"]),
+            incident_id=str(kwargs["incident_id"]),
+            event_id=str(kwargs["event_id"]),
+            assessed_at=kwargs["assessed_at"],
+            risk_level=str(kwargs["risk_level"]),
+            policy_score=kwargs.get("policy_score"),
+            confidence_status=str(kwargs.get("confidence_status") or "not_calibrated"),
+            factor_results=list(kwargs.get("factor_results") or []),
+            missing_evidence=list(kwargs.get("missing_evidence") or []),
+            rationale=str(kwargs["rationale"]),
+        )
+        self.db.add(record)
+        self.db.flush()
+        return record, True
+
+    def list_for_incident(self, incident_id: str) -> List[RiskAssessment]:
+        return self.db.query(RiskAssessment).filter(
+            RiskAssessment.incident_id == incident_id,
+        ).order_by(RiskAssessment.assessed_at.asc(), RiskAssessment.id.asc()).all()
+
+
+class IncidentRepository:
+    """Database access for the one active incident-correlation path."""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def add(self, incident: Incident) -> Incident:
+        self.db.add(incident)
+        self.db.flush()
+        return incident
+
+    def get_by_incident_id(self, incident_id: str) -> Optional[Incident]:
+        return self.db.query(Incident).filter(
+            Incident.incident_id == incident_id,
+        ).one_or_none()
+
+    def get_active_candidates(self, *, camera_id: str, since: datetime, limit: int = 50) -> List[Incident]:
+        return self.db.query(Incident).filter(
+            Incident.status == "active",
+            Incident.camera_id == camera_id,
+            Incident.last_seen_time >= since,
+        ).order_by(desc(Incident.last_seen_time)).limit(limit).all()
+
+    def list_active(self, limit: int = 50) -> List[Incident]:
+        return self.db.query(Incident).filter(
+            Incident.status == "active",
+        ).order_by(desc(Incident.last_seen_time)).limit(limit).all()
+
+    def list_recent(self, limit: int = 50) -> List[Incident]:
+        return self.db.query(Incident).order_by(desc(Incident.last_seen_time)).limit(limit).all()
+
+    def active_count(self) -> int:
+        return self.db.query(Incident).filter(Incident.status == "active").count()
+
+    def set_lifecycle_status(
+        self,
+        incident_id: str,
+        lifecycle_status: str,
+        *,
+        actor_id: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> Optional[Incident]:
+        """Record an operator decision while retaining correlation state.
+
+        Terminal lifecycle values also close correlation so late frames cannot
+        silently re-open a human-resolved or false-positive incident.
+        """
+        normalized = str(lifecycle_status or "").strip().lower()
+        allowed = {"open", "acknowledged", "under_review", "resolved", "false_positive"}
+        if normalized not in allowed:
+            raise ValueError("Unsupported incident lifecycle status.")
+        incident = self.get_by_incident_id(incident_id)
+        if incident is None:
+            return None
+        incident.lifecycle_status = normalized
+        incident.lifecycle_updated_by = actor_id or "api-key-operator"
+        incident.lifecycle_updated_at = datetime.now(timezone.utc)
+        incident.lifecycle_reason = str(reason).strip() if reason and str(reason).strip() else None
+        if normalized in {"resolved", "false_positive"}:
+            incident.status = "resolved"
+        else:
+            incident.status = "active"
+        self.db.flush()
+        return incident
+
+    def resolve_expired(self, *, cutoff: datetime, resolved_at: Optional[datetime] = None) -> int:
+        now = resolved_at or datetime.now(timezone.utc)
+        return self.db.query(Incident).filter(
+            Incident.status == "active",
+            Incident.lifecycle_status.in_(("open", "acknowledged")),
+            Incident.last_seen_time < cutoff,
+        ).update(
+            {
+                Incident.status: "resolved",
+                Incident.lifecycle_status: "resolved",
+                Incident.lifecycle_updated_at: now,
+                Incident.updated_at: now,
+            },
+            synchronize_session="fetch",
+        )
+
+
+class AuditLogRepository:
+    """Database access for append-only security and operator audit records."""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def append(
+        self,
+        *,
+        action: str,
+        actor_id: Optional[str] = None,
+        resource_type: Optional[str] = None,
+        resource_id: Optional[str] = None,
+        details: Optional[dict] = None,
+    ) -> AuditLog:
+        record = AuditLog(
+            action=str(action).strip(),
+            actor_id=str(actor_id).strip() if actor_id else None,
+            resource_type=str(resource_type).strip() if resource_type else None,
+            resource_id=str(resource_id).strip() if resource_id else None,
+            details=dict(details or {}),
+        )
+        self.db.add(record)
+        self.db.flush()
+        return record
+
+    def list_recent(self, limit: int = 100) -> List[AuditLog]:
+        return self.db.query(AuditLog).order_by(desc(AuditLog.created_at), desc(AuditLog.id)).limit(limit).all()
+
+
+class OperationalAlertRepository:
+    """Repository for durable operator alert lifecycle state."""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create_or_get(
+        self,
+        *,
+        alert_id: str,
+        event_id: str,
+        event_record_id: Optional[int],
+        track_id: Optional[str],
+        level: str,
+        risk_score: Optional[float],
+        message: str,
+        zone: Optional[str],
+        factors: Optional[list],
+        cooldown_key: Optional[str],
+        cooldown_expires_at: Optional[datetime],
+        delivery_status: str,
+        delivery_attempts: int,
+        delivered_at: Optional[datetime],
+        last_delivery_error: Optional[str],
+    ) -> OperationalAlert:
+        existing = self.get_by_alert_id(alert_id)
+        if existing is not None:
+            return existing
+        record = OperationalAlert(
+            alert_id=alert_id,
+            event_id=event_id,
+            event_record_id=event_record_id,
+            track_id=track_id,
+            level=level,
+            risk_score=risk_score,
+            message=message,
+            zone=zone,
+            factors=list(factors or []),
+            cooldown_key=cooldown_key,
+            cooldown_expires_at=cooldown_expires_at,
+            delivery_status=delivery_status,
+            delivery_attempts=max(0, int(delivery_attempts or 0)),
+            delivered_at=delivered_at,
+            last_delivery_error=last_delivery_error,
+        )
+        self.db.add(record)
+        self.db.flush()
+        return record
+
+    def get_by_alert_id(self, alert_id: str) -> Optional[OperationalAlert]:
+        return self.db.query(OperationalAlert).filter(
+            OperationalAlert.alert_id == alert_id,
+        ).one_or_none()
+
+    def get_by_event_id(self, event_id: str) -> Optional[OperationalAlert]:
+        return self.db.query(OperationalAlert).filter(
+            OperationalAlert.event_id == event_id,
+        ).order_by(desc(OperationalAlert.created_at)).first()
+
+    def get_recent(self, limit: int = 50, level: Optional[str] = None) -> List[OperationalAlert]:
+        query = self.db.query(OperationalAlert)
+        if level:
+            query = query.filter(OperationalAlert.level == level.upper())
+        return query.order_by(desc(OperationalAlert.created_at)).limit(limit).all()
+
+    def get_active(self, limit: int = 50) -> List[OperationalAlert]:
+        return self.db.query(OperationalAlert).filter(
+            OperationalAlert.acknowledged.is_(False),
+        ).order_by(desc(OperationalAlert.created_at)).limit(limit).all()
+
+    def acknowledge(self, alert_id: str, acknowledged_by: str = "api-key-operator") -> Optional[OperationalAlert]:
+        record = self.get_by_alert_id(alert_id) or self.get_by_event_id(alert_id)
+        if record is None:
+            return None
+        if not record.acknowledged:
+            record.acknowledged = True
+            record.acknowledged_at = datetime.now(timezone.utc)
+            record.acknowledged_by = acknowledged_by
+            self.db.flush()
+        return record
+
+    def active_cooldown(self, cooldown_key: str, now: Optional[datetime] = None) -> Optional[OperationalAlert]:
+        if not cooldown_key:
+            return None
+        observed_at = now or datetime.now(timezone.utc)
+        return self.db.query(OperationalAlert).filter(
+            OperationalAlert.cooldown_key == cooldown_key,
+            OperationalAlert.cooldown_expires_at.isnot(None),
+            OperationalAlert.cooldown_expires_at > observed_at,
+        ).order_by(desc(OperationalAlert.created_at)).first()
+
+    def summary(self) -> dict:
+        records = self.db.query(OperationalAlert).all()
+        by_level = {"INFO": 0, "WARNING": 0, "HIGH": 0, "CRITICAL": 0}
+        for record in records:
+            if record.level in by_level:
+                by_level[record.level] += 1
+        return {
+            "total_alerts": len(records),
+            "by_level": by_level,
+            "active": sum(1 for record in records if not record.acknowledged),
+        }
 
 
 class BehavioralSessionRepository:

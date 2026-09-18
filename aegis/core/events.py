@@ -80,6 +80,10 @@ class EventBus:
         self._fallback_streams: Dict[str, Deque[Dict[str, Any]]] = defaultdict(
             lambda: deque(maxlen=maxlen)
         )
+        # Redis' XREADGROUP blocks when there is no work.  The local fallback
+        # must provide the same behaviour; otherwise every idle pipeline stage
+        # spins at full speed and can starve the API/voice event loop.
+        self._fallback_condition = threading.Condition()
         self._subscribers: Dict[str, List[Callable]] = defaultdict(list)
 
         self._connect()
@@ -150,10 +154,15 @@ class EventBus:
                 logger.debug("Redis publish failed, falling back: %s", exc)
                 self._connected = False
 
-        # Fallback: in-memory + local subscribers
-        data["_ts"] = time.time()
-        self._fallback_streams[key].append(data)
-        self._notify_subscribers(stream, data)
+        # Fallback: in-memory + local subscribers.  Do not mutate the
+        # caller's event object: a single finalized alert can safely travel to
+        # API state, durable evidence, and this bus independently.
+        fallback_data = dict(data)
+        fallback_data["_ts"] = time.time()
+        with self._fallback_condition:
+            self._fallback_streams[key].append(fallback_data)
+            self._fallback_condition.notify_all()
+        self._notify_subscribers(stream, fallback_data)
         return None
 
     def publish_many(
@@ -217,7 +226,7 @@ class EventBus:
         Returns list of (message_id, data) tuples.
         """
         if not self._connected or not self._redis:
-            return self._read_fallback(stream, count)
+            return self._read_fallback(stream, count, block_ms)
 
         key = self.stream_key(stream)
         group = group or self._consumer_group
@@ -247,7 +256,7 @@ class EventBus:
 
         except Exception as exc:
             logger.debug("Redis read failed: %s", exc)
-            return self._read_fallback(stream, count)
+            return self._read_fallback(stream, count, block_ms)
 
     def ack(
         self,
@@ -283,21 +292,27 @@ class EventBus:
                 logger.error("Subscriber callback error on %s: %s", stream, exc)
 
     def _read_fallback(
-        self, stream: str, count: int
+        self, stream: str, count: int, block_ms: int = 1000
     ) -> List[Tuple[str, Dict[str, Any]]]:
+        """Block like Redis XREADGROUP while the local queue has no work."""
         key = self.stream_key(stream)
-        q = self._fallback_streams.get(key)
-        if not q:
-            return []
+        timeout_seconds = max(0.0, block_ms / 1000.0)
+        with self._fallback_condition:
+            q = self._fallback_streams.get(key)
+            if not q:
+                self._fallback_condition.wait(timeout=timeout_seconds)
+                q = self._fallback_streams.get(key)
+            if not q:
+                return []
 
-        messages = []
-        for _ in range(min(count, len(q))):
-            try:
-                data = q.popleft()
-                messages.append((f"fallback-{time.monotonic_ns()}", data))
-            except IndexError:
-                break
-        return messages
+            messages = []
+            for _ in range(min(count, len(q))):
+                try:
+                    data = q.popleft()
+                    messages.append((f"fallback-{time.monotonic_ns()}", data))
+                except IndexError:
+                    break
+            return messages
 
     # ------------------------------------------------------------------
     # Utilities

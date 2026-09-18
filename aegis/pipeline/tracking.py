@@ -181,6 +181,13 @@ class TrackingStage(PipelineStage):
                     confidence=d["confidence"],
                     class_id=d["class_id"],
                     class_name=d["class_name"],
+                    object_category=d.get("object_category", "generic"),
+                    is_weapon=bool(d.get("is_weapon", False)),
+                    is_person=bool(d.get("is_person", False)),
+                    is_vehicle=bool(d.get("is_vehicle", False)),
+                    is_animal=bool(d.get("is_animal", False)),
+                    model_source=str(d.get("model_source", "")),
+                    source_class_id=d.get("source_class_id"),
                 )
                 for d in raw
             ]

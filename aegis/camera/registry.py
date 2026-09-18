@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -75,9 +76,20 @@ class CameraRegistry:
         self._storage_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "cameras": [
-                config.to_private_dict() for config in self._configs.values()
+                (
+                    config.to_persisted_dict()
+                    if hasattr(config, "to_persisted_dict")
+                    else config.to_private_dict()
+                )
+                for config in self._configs.values()
             ]
         }
-        self._storage_path.write_text(
+        temporary_path = self._storage_path.with_suffix(".tmp")
+        temporary_path.write_text(
             json.dumps(payload, indent=2), encoding="utf-8"
         )
+        temporary_path.replace(self._storage_path)
+        try:
+            os.chmod(self._storage_path, 0o600)
+        except OSError:
+            pass

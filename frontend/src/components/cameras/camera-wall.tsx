@@ -2,17 +2,18 @@
 
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslations } from "next-intl";
 import {
-  AlertTriangle,
-  CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  CircleOff,
   Grid2X2,
-  LoaderCircle,
   MapPin,
   Maximize2,
   Search,
+  ScanLine,
+  ArrowUpRight,
+  Activity,
+  WifiOff,
   Video,
 } from "lucide-react";
 
@@ -65,14 +66,14 @@ function cameraStatus(camera: Camera, attentionCameraIds: Set<string>): CameraWa
 }
 
 function hasDelayedLiveImage(camera: Camera) {
-  return camera.runtime.status === "reconnecting";
+  return ["connecting", "reconnecting"].includes(camera.runtime.status);
 }
 
-function statusCopy(status: CameraWallStatus) {
-  if (status === "live") return "Live";
-  if (status === "attention") return "Needs attention";
-  if (status === "offline") return "Offline";
-  return "Unavailable";
+function statusCopy(status: CameraWallStatus, t: ReturnType<typeof useTranslations>) {
+  if (status === "live") return t("live");
+  if (status === "attention") return t("needsAttention");
+  if (status === "offline") return t("offline");
+  return t("unavailable");
 }
 
 function eventSummary(event: RiskEvent) {
@@ -112,18 +113,20 @@ export function CameraWall({
   events,
   initialView,
   initialCameraId,
-  systemStatus,
   onViewChange,
   onCameraChange,
+  eventsUnavailable = false,
 }: {
   cameras: Camera[];
   events: RiskEvent[];
   initialView: CameraWallView;
   initialCameraId?: string;
-  systemStatus: "connected" | "degraded" | "unavailable" | "loading";
   onViewChange: (view: CameraWallView) => void;
   onCameraChange: (cameraId: string) => void;
+  systemStatus?: "connected" | "degraded" | "unavailable" | "loading";
+  eventsUnavailable?: boolean;
 }) {
+  const t = useTranslations("cameras");
   const [view, setView] = useState<CameraWallView>(initialView);
   const [filter, setFilter] = useState<CameraWallFilter>("all");
   const [query, setQuery] = useState("");
@@ -170,38 +173,46 @@ export function CameraWall({
 
   return (
     <div className="space-y-4">
-      <CameraWallToolbar
-        counts={counts}
-        filter={filter}
-        view={view}
-        query={query}
-        mapAvailable={mappedCameras.length > 0}
-        onFilterChange={(nextFilter) => {
-          setFilter(nextFilter);
-          setPage(0);
-        }}
-        onViewChange={changeView}
-        onQueryChange={(nextQuery) => {
-          setQuery(nextQuery);
-          setPage(0);
-        }}
-      />
-
-      {view === "grid" ? (
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-          <div className="min-w-0">
-            {filteredCameras.length ? <CameraGrid cameras={visibleCameras} selectedCameraId={selectedCamera?.camera_id} attentionCameraIds={attentionCameraIds} onFocus={focusCamera} /> : <NoCameraResults />}
-            {filteredCameras.length > CAMERAS_PER_PAGE ? <CameraWallPagination page={safePage} pageCount={pageCount} total={filteredCameras.length} onChange={setPage} /> : null}
-          </div>
-          <NeedsReviewQueue items={reviewItems} onReview={focusCamera} />
-        </div>
+      {view !== "focus" ? (
+        <CameraWallToolbar
+          counts={counts}
+          filter={filter}
+          view={view}
+          query={query}
+          mapAvailable={mappedCameras.length > 0}
+          onFilterChange={(nextFilter) => {
+            setFilter(nextFilter);
+            setPage(0);
+          }}
+          onViewChange={changeView}
+          onQueryChange={(nextQuery) => {
+            setQuery(nextQuery);
+            setPage(0);
+          }}
+          t={t}
+        />
       ) : null}
 
-      {view === "focus" && selectedCamera ? <CameraFocusWorkspace camera={selectedCamera} cameras={focusCameras.length ? focusCameras : cameras.slice(0, CAMERAS_PER_PAGE)} attentionCameraIds={attentionCameraIds} onSelect={focusCamera} onBack={() => changeView("grid")} reviewItems={reviewItems} /> : null}
+      {view === "grid" ? (
+        <div className="camera-monitor-layout"><div className="min-w-0">
+          {filteredCameras.length ? <CameraGrid cameras={visibleCameras} selectedCameraId={selectedCamera?.camera_id} attentionCameraIds={attentionCameraIds} onFocus={focusCamera} t={t} /> : <NoCameraResults t={t} />}
+          {filteredCameras.length > CAMERAS_PER_PAGE ? <CameraWallPagination page={safePage} pageCount={pageCount} total={filteredCameras.length} onChange={setPage} /> : null}
+        </div>
+        <aside className="camera-review-panel">
+          <div className="camera-review-heading"><span className="camera-review-icon"><Activity aria-hidden /></span><div><p className="camera-eyebrow">{t("workspace.operations")}</p><h2>{t("workspace.review")}</h2></div><span className="camera-review-count">{reviewItems.length}</span></div>
+          <p className="camera-review-description">{t("workspace.reviewDescription")}</p>
+          {eventsUnavailable ? <p className="camera-review-notice">{t("workspace.eventsUnavailable")}</p> : null}
+          <div className="camera-review-list">{reviewItems.length ? reviewItems.map((item) => <button key={`${item.camera.camera_id}-${item.status}`} type="button" onClick={() => focusCamera(item.camera)} className="camera-review-item">
+            <span className={cn("camera-review-marker", item.status === "attention" && "is-attention")}>{item.status === "offline" ? <WifiOff aria-hidden /> : <ScanLine aria-hidden />}</span>
+            <span className="min-w-0 flex-1"><strong>{cameraDisplayName(item.camera)}</strong><span>{item.status === "offline" ? t("workspace.connectionOffline") : t("workspace.activityReview")}</span></span><ArrowUpRight className="h-4 w-4 shrink-0 text-slate-500" aria-hidden />
+          </button>) : <p className="camera-review-empty">{t("workspace.noReview")}</p>}</div>
+          <div className="camera-review-note"><ScanLine aria-hidden /><span>{t("workspace.focusHint")}</span></div>
+        </aside></div>
+      ) : null}
+
+      {view === "focus" && selectedCamera ? <CameraFocusWorkspace camera={selectedCamera} cameras={focusCameras.length ? focusCameras : cameras.slice(0, CAMERAS_PER_PAGE)} attentionCameraIds={attentionCameraIds} onSelect={focusCamera} onBack={() => changeView("grid")} /> : null}
 
       {view === "map" ? <CameraMapView cameras={mappedCameras} attentionCameraIds={attentionCameraIds} onFocus={focusCamera} /> : null}
-
-      <CameraWallFooter counts={counts} status={systemStatus} />
     </div>
   );
 }
@@ -215,6 +226,7 @@ export function CameraWallToolbar({
   onFilterChange,
   onViewChange,
   onQueryChange,
+  t,
 }: {
   counts: { total: number; live: number; attention: number; offline: number };
   filter: CameraWallFilter;
@@ -224,51 +236,47 @@ export function CameraWallToolbar({
   onFilterChange: (filter: CameraWallFilter) => void;
   onViewChange: (view: CameraWallView) => void;
   onQueryChange: (query: string) => void;
+  t: ReturnType<typeof useTranslations>;
 }) {
   const filters: Array<{ id: CameraWallFilter; label: string; count?: number }> = [
-    { id: "all", label: "All cameras", count: counts.total },
-    { id: "live", label: "Live", count: counts.live },
-    { id: "attention", label: "Needs attention", count: counts.attention },
-    { id: "offline", label: "Offline", count: counts.offline },
+    { id: "all", label: t("allCameras"), count: counts.total },
+    { id: "live", label: t("live"), count: counts.live },
+    { id: "attention", label: t("needsAttention"), count: counts.attention },
+    { id: "offline", label: t("offline"), count: counts.offline },
   ];
   return (
-    <div className="rounded-xl border border-white/10 bg-command-950/95 p-3 shadow-xl backdrop-blur-xl">
-      <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-white">Camera Wall</h1>
-          <p className="mt-1 text-sm text-slate-400"><span className="text-white">{counts.total} cameras</span> · <span className="text-emerald-300">{counts.live} live</span> · <span className="text-amber-200">{counts.attention} need attention</span> · <span>{counts.offline} offline</span></p>
-        </div>
-        <label className="relative block min-w-0 xl:w-72">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden />
-          <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search cameras" className="h-10 w-full rounded-lg border border-white/10 bg-black/20 pl-9 pr-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-signal-cyan/55" aria-label="Search cameras" />
-        </label>
+    <div className="camera-wall-toolbar">
+      <div className="camera-filter-tabs" role="group" aria-label="Camera filters">
+        {filters.map((item) => <button key={item.id} type="button" onClick={() => onFilterChange(item.id)} aria-pressed={filter === item.id} className={cn("camera-filter-tab", filter === item.id && "is-active")}>
+          {item.id !== "all" ? <span aria-hidden className={cn("h-1.5 w-1.5 shrink-0 rounded-full", item.id === "live" ? "bg-emerald-400" : item.id === "attention" ? "bg-amber-300" : "bg-slate-500")} /> : null}
+          {item.label}{" "}<span className="camera-filter-count">{item.count}</span>
+        </button>)}
       </div>
-      <div className="mt-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex max-w-full gap-1 overflow-x-auto rounded-lg border border-white/10 bg-black/15 p-1" role="group" aria-label="Camera filters">
-          {filters.map((item) => <button key={item.id} type="button" onClick={() => onFilterChange(item.id)} className={cn("min-h-9 shrink-0 rounded-md px-3 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan", filter === item.id ? "bg-signal-cyan/15 text-signal-cyan" : "text-slate-300 hover:bg-white/[0.06]")}>{item.label} <span className="ml-1 text-xs opacity-75">{item.count}</span></button>)}
-        </div>
-        <div className="flex rounded-lg border border-white/10 bg-black/15 p-1" role="group" aria-label="Camera wall view">
-          <ViewButton active={view === "grid"} onClick={() => onViewChange("grid")} icon={Grid2X2} label="Grid" />
-          <ViewButton active={view === "focus"} onClick={() => onViewChange("focus")} icon={Maximize2} label="Focus" />
-          <ViewButton active={view === "map"} onClick={() => onViewChange("map")} icon={MapPin} label="Map" disabled={!mapAvailable} title={mapAvailable ? "Show configured camera locations" : "Camera locations are not configured yet."} />
-        </div>
+      <label className="camera-toolbar-search relative block min-w-0">
+        <Search className="pointer-events-none absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden />
+        <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder={t("searchPlaceholder")} className="h-9 w-full rounded-lg border border-white/10 bg-black/20 ps-9 pe-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-signal-cyan/55" aria-label="Search cameras" />
+      </label>
+      <div className="camera-view-switch flex rounded-lg border border-white/10 bg-black/15 p-0.5" role="group" aria-label="Camera wall view">
+        <ViewButton active={view === "grid"} onClick={() => onViewChange("grid")} icon={Grid2X2} label={t("grid")} />
+        <ViewButton active={view === "focus"} onClick={() => onViewChange("focus")} icon={Maximize2} label={t("focus")} />
+        <ViewButton active={view === "map"} onClick={() => onViewChange("map")} icon={MapPin} label={t("map")} disabled={!mapAvailable} title={mapAvailable ? "Show configured camera locations" : "Camera locations are not configured yet."} />
       </div>
     </div>
   );
 }
 
 function ViewButton({ active, onClick, icon: Icon, label, disabled, title }: { active: boolean; onClick: () => void; icon: typeof Grid2X2; label: string; disabled?: boolean; title?: string }) {
-  return <button type="button" onClick={onClick} disabled={disabled} title={title} className={cn("inline-flex min-h-9 items-center gap-2 rounded-md px-3 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan disabled:cursor-not-allowed disabled:opacity-40", active ? "bg-signal-cyan/15 text-signal-cyan" : "text-slate-300 hover:bg-white/[0.06]")}><Icon className="h-4 w-4" aria-hidden />{label}</button>;
+  return <button type="button" onClick={onClick} aria-pressed={active} disabled={disabled} title={title} className={cn("inline-flex min-h-9 items-center gap-2 rounded-md px-3 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan disabled:cursor-not-allowed disabled:opacity-40", active ? "bg-signal-cyan/15 text-signal-cyan" : "text-slate-300 hover:bg-white/[0.06]")}><Icon className="h-4 w-4" aria-hidden />{label}</button>;
 }
 
-export function CameraGrid({ cameras, selectedCameraId, attentionCameraIds, onFocus }: { cameras: Camera[]; selectedCameraId?: string; attentionCameraIds: Set<string>; onFocus: (camera: Camera) => void }) {
+export function CameraGrid({ cameras, selectedCameraId, attentionCameraIds, onFocus, t }: { cameras: Camera[]; selectedCameraId?: string; attentionCameraIds: Set<string>; onFocus: (camera: Camera) => void, t: ReturnType<typeof useTranslations> }) {
   const gridRef = useRef<HTMLDivElement>(null);
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (!["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"].includes(event.key)) return;
     const tiles = Array.from(gridRef.current?.querySelectorAll<HTMLButtonElement>("[data-camera-tile]") ?? []);
     const current = tiles.indexOf(document.activeElement as HTMLButtonElement);
     if (current < 0) return;
-    const columns = 3;
+    const columns = gridRef.current ? getComputedStyle(gridRef.current).gridTemplateColumns.split(" ").length : 1;
     const delta = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : event.key === "ArrowDown" ? columns : -columns;
     const next = Math.min(tiles.length - 1, Math.max(0, current + delta));
     if (next !== current) {
@@ -276,29 +284,31 @@ export function CameraGrid({ cameras, selectedCameraId, attentionCameraIds, onFo
       tiles[next]?.focus();
     }
   };
-  return <div ref={gridRef} onKeyDown={onKeyDown} className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-label="Camera grid">{cameras.map((camera) => <CameraTile key={camera.camera_id} camera={camera} selected={selectedCameraId === camera.camera_id} status={cameraStatus(camera, attentionCameraIds)} onFocus={onFocus} />)}</div>;
+  return <div ref={gridRef} onKeyDown={onKeyDown} className="camera-feed-grid" aria-label="Camera grid">{cameras.map((camera) => <CameraTile key={camera.camera_id} camera={camera} selected={selectedCameraId === camera.camera_id} status={cameraStatus(camera, attentionCameraIds)} onFocus={onFocus} t={t} />)}</div>;
 }
 
-export function CameraTile({ camera, status, selected, onFocus }: { camera: Camera; status: CameraWallStatus; selected: boolean; onFocus: (camera: Camera) => void }) {
+export function CameraTile({ camera, status, selected, onFocus, t }: { camera: Camera; status: CameraWallStatus; selected: boolean; onFocus: (camera: Camera) => void, t: ReturnType<typeof useTranslations> }) {
   return (
-    <button data-camera-tile type="button" onClick={() => onFocus(camera)} className={cn("group relative aspect-video overflow-hidden rounded-xl border bg-command-900 text-left shadow-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan", selected ? "border-signal-cyan ring-1 ring-signal-cyan/60" : "border-white/10 hover:border-signal-cyan/45")} aria-label={`Open ${cameraDisplayName(camera)} in Focus mode`}>
-      <CameraPreview camera={camera} status={status} />
-      <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/75 to-transparent p-3">
-        <div className="min-w-0"><p className="truncate text-sm font-semibold text-white">{cameraDisplayName(camera)}</p><span className={statusPillClass(status)}>{statusCopy(status)}</span></div>
-        {selected ? <span className="rounded bg-signal-cyan/20 px-2 py-1 text-[11px] font-semibold text-signal-cyan">Selected</span> : null}
+    <button data-camera-tile type="button" onClick={() => onFocus(camera)} className={cn("camera-feed-card group", selected && "is-selected border-signal-cyan")} aria-label={`Open ${cameraDisplayName(camera)} in Focus mode`}>
+      <div className="camera-feed-image">
+        <CameraPreview camera={camera} status={status} />
+        <span className={cn("camera-feed-status", statusPillClass(status))}><StatusDot status={status} t={t} />{statusCopy(status, t)}</span>
+        <span className="camera-feed-expand"><Maximize2 className="h-4 w-4" aria-hidden /></span>
+        <div className="camera-feed-time"><span>{camera.runtime.last_frame_time ? formatTime(camera.runtime.last_frame_time) : t("noLiveFrame")}</span>{selected ? <span>{t("selected")}</span> : null}</div>
       </div>
-      <div className="absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/80 to-transparent p-3 text-xs text-slate-200"><span>{camera.runtime.last_frame_time ? formatTime(camera.runtime.last_frame_time) : "No live frame"}</span><StatusDot status={status} /></div>
+      <div className="camera-feed-caption"><span className="camera-feed-symbol"><Video aria-hidden /></span><span className="min-w-0 flex-1"><strong>{cameraDisplayName(camera)}</strong><span>{t("workspace.openFeed")}</span></span><ArrowUpRight className="h-4 w-4 text-slate-500 transition group-hover:text-cyan-300" aria-hidden /></div>
     </button>
   );
 }
 
 export function CameraPreview({ camera, status }: { camera: Camera; status: CameraWallStatus }) {
+  const t = useTranslations("cameras");
   const elementRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const [generation, setGeneration] = useState(0);
   const [failedGeneration, setFailedGeneration] = useState<number | null>(null);
   const delayed = hasDelayedLiveImage(camera);
-  const canPreview = (status === "live" || status === "attention") && !delayed;
+  const canPreview = camera.runtime.status === "online" && camera.runtime.running && !delayed;
 
   useEffect(() => {
     const element = elementRef.current;
@@ -310,37 +320,33 @@ export function CameraPreview({ camera, status }: { camera: Camera; status: Came
 
   useEffect(() => {
     if (!visible || !canPreview) return undefined;
-    const timer = window.setInterval(() => setGeneration((value) => value + 1), 4_000);
+    const timer = window.setInterval(() => setGeneration((value) => value + 1), 250);
     return () => window.clearInterval(timer);
   }, [canPreview, visible]);
 
   const previewFailed = failedGeneration === generation;
-  const message = status === "offline" ? "Camera offline" : status === "unavailable" ? "Preview unavailable" : delayed ? "Live image is delayed." : previewFailed ? "Preview unavailable" : "Waiting for live frame";
+  const message = status === "offline" ? t("workspace.cameraOffline") : status === "unavailable" || previewFailed ? t("workspace.previewUnavailable") : delayed ? t("workspace.delayed") : t("workspace.waitingFrame");
   return (
     <div ref={elementRef} className="absolute inset-0 bg-black">
       {visible && canPreview && !previewFailed ? <>
         {/* eslint-disable-next-line @next/next/no-img-element -- authenticated Aegis snapshot endpoint refreshes at a controlled cadence. */}
         <img src={snapshotUrl(camera, generation)} alt="" className="h-full w-full object-cover" loading="lazy" onError={() => setFailedGeneration(generation)} />
       </> : null}
-      {(!visible || !canPreview || previewFailed) ? <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-command-900 to-black/80 text-center text-xs text-slate-400"><Video className="h-6 w-6 text-slate-600" aria-hidden />{message}</div> : null}
+      {(!visible || !canPreview || previewFailed) ? <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 camera-preview-empty text-center text-xs text-slate-400"><Video className="h-6 w-6 text-slate-600" aria-hidden />{message}</div> : null}
     </div>
   );
 }
 
-export function NeedsReviewQueue({ items, onReview }: { items: ReviewItem[]; onReview: (camera: Camera) => void }) {
-  return <aside className="glass-panel rounded-xl p-4 sm:p-5" aria-labelledby="needs-review-title"><div className="flex items-center justify-between gap-3"><h2 id="needs-review-title" className="text-xl font-semibold text-white">Needs review</h2><span className="rounded-full bg-white/10 px-2.5 py-1 text-sm font-semibold text-slate-200">{items.length}</span></div>{items.length === 0 ? <p className="mt-5 text-sm text-slate-400">No items need review.</p> : <div className="mt-4 space-y-3">{items.slice(0, 8).map((item) => <article key={`${item.status}-${item.camera.camera_id}`} className={cn("rounded-lg border p-3.5", item.status === "offline" ? "border-slate-400/25 bg-white/[0.035]" : "border-amber-300/35 bg-amber-300/[0.06]")}><div className="flex items-start gap-3"><span className={cn("mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md", item.status === "offline" ? "bg-slate-400/10 text-slate-300" : "bg-amber-300/10 text-amber-200")}>{item.status === "offline" ? <CircleOff className="h-4 w-4" aria-hidden /> : <AlertTriangle className="h-4 w-4" aria-hidden />}</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-white">{cameraDisplayName(item.camera)}</p><p className="mt-1 text-sm text-slate-300">{item.summary}</p><p className="mt-1 text-xs text-slate-400">{item.timestamp ? formatTime(String(item.timestamp)) : "Time unavailable"}</p><button type="button" onClick={() => onReview(item.camera)} className="mt-3 min-h-8 w-full rounded-md border border-signal-cyan/60 text-xs font-semibold text-signal-cyan transition hover:bg-signal-cyan/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan">Review</button></div></div></article>)}</div>}</aside>;
-}
-
-export function CameraFocusWorkspace({ camera, cameras, attentionCameraIds, reviewItems, onSelect, onBack }: { camera: Camera; cameras: Camera[]; attentionCameraIds: Set<string>; reviewItems: ReviewItem[]; onSelect: (camera: Camera) => void; onBack: () => void }) {
-  return <div className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-3"><button type="button" onClick={onBack} className="inline-flex min-h-9 items-center gap-2 rounded-md border border-white/10 px-3 text-sm font-medium text-slate-200 hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan"><ChevronLeft className="h-4 w-4" aria-hidden />Back to grid</button><p className="text-sm text-slate-400">Select another camera below to switch focus.</p></div><div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_300px]"><div className="min-w-0"><CameraCommandCenter key={camera.camera_id} camera={camera} /><CameraThumbnailRail cameras={cameras} selectedCameraId={camera.camera_id} attentionCameraIds={attentionCameraIds} onSelect={onSelect} /></div><NeedsReviewQueue items={reviewItems} onReview={onSelect} /></div></div>;
+export function CameraFocusWorkspace({ camera, cameras, attentionCameraIds, onSelect, onBack }: { camera: Camera; cameras: Camera[]; attentionCameraIds: Set<string>; onSelect: (camera: Camera) => void; onBack: () => void }) {
+  return <div className="space-y-3"><button type="button" onClick={onBack} className="inline-flex min-h-9 items-center gap-2 rounded-md border border-white/10 px-3 text-sm font-medium text-slate-200 hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan"><ChevronLeft className="h-4 w-4" aria-hidden />Back to grid</button><div className="min-w-0"><CameraCommandCenter key={camera.camera_id} camera={camera} cameraSwitcher={<CameraThumbnailRail cameras={cameras} selectedCameraId={camera.camera_id} attentionCameraIds={attentionCameraIds} onSelect={onSelect} />} /></div></div>;
 }
 
 export function CameraThumbnailRail({ cameras, selectedCameraId, attentionCameraIds, onSelect }: { cameras: Camera[]; selectedCameraId: string; attentionCameraIds: Set<string>; onSelect: (camera: Camera) => void }) {
-  return <div className="mt-4 flex gap-2 overflow-x-auto pb-1" aria-label="Focus camera thumbnails">{cameras.map((camera) => <button key={camera.camera_id} type="button" onClick={() => onSelect(camera)} className={cn("w-36 shrink-0 overflow-hidden rounded-lg border bg-command-900 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan", camera.camera_id === selectedCameraId ? "border-signal-cyan" : "border-white/10")}><div className="relative aspect-video"><CameraPreview camera={camera} status={cameraStatus(camera, attentionCameraIds)} /></div><p className="truncate px-2 py-1.5 text-xs font-medium text-white">{cameraDisplayName(camera)}</p></button>)}</div>;
+  return <div className="flex gap-3 overflow-x-auto pb-1" aria-label="Focus camera thumbnails">{cameras.map((camera) => <button key={camera.camera_id} type="button" onClick={() => onSelect(camera)} className={cn("w-44 shrink-0 overflow-hidden rounded-lg border bg-command-900 text-start transition hover:border-signal-cyan/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan sm:w-52 lg:w-56", camera.camera_id === selectedCameraId ? "border-signal-cyan ring-1 ring-signal-cyan/55" : "border-white/10")}><div className="relative aspect-video"><CameraPreview camera={camera} status={cameraStatus(camera, attentionCameraIds)} /></div><p className="truncate px-2.5 py-2 text-xs font-medium text-white">{cameraDisplayName(camera)}</p></button>)}</div>;
 }
 
 export function CameraMapView({ cameras, attentionCameraIds, onFocus }: { cameras: Array<{ camera: Camera; coordinates: { latitude: number; longitude: number } }>; attentionCameraIds: Set<string>; onFocus: (camera: Camera) => void }) {
-  if (!cameras.length) return <div className="glass-panel rounded-xl p-10 text-center"><MapPin className="mx-auto h-8 w-8 text-slate-500" aria-hidden /><h2 className="mt-3 text-lg font-semibold text-white">Camera locations are not configured yet.</h2><p className="mt-2 text-sm text-slate-400">Add real coordinates in camera configuration to use Map view.</p></div>;
+  if (!cameras.length) return <div className="glass-panel rounded-xl p-10 text-center"><MapPin className="mx-auto h-8 w-8 text-slate-500" aria-hidden /><h2 className="mt-3 text-lg font-semibold text-white">Camera locations are not configured yet.</h2><p className="mt-2 text-sm text-slate-400">Add a camera location to use Map view.</p></div>;
   const latitudes = cameras.map(({ coordinates }) => coordinates.latitude);
   const longitudes = cameras.map(({ coordinates }) => coordinates.longitude);
   const minLat = Math.min(...latitudes); const maxLat = Math.max(...latitudes); const minLng = Math.min(...longitudes); const maxLng = Math.max(...longitudes);
@@ -361,9 +367,9 @@ export function CameraDetailsDrawer({ children }: { children: ReactNode }) {
   );
 }
 
-function NoCameraResults() { return <div className="glass-panel rounded-xl p-10 text-center"><Search className="mx-auto h-7 w-7 text-slate-500" aria-hidden /><p className="mt-3 text-base font-semibold text-white">No cameras match this filter.</p></div>; }
-function StatusDot({ status }: { status: CameraWallStatus }) { return <span className={cn("h-3 w-3 rounded-full border border-white/30", status === "live" ? "bg-emerald-400" : status === "attention" ? "bg-amber-400" : status === "offline" ? "bg-slate-400" : "bg-rose-400")} aria-label={statusCopy(status)} />; }
+function NoCameraResults({ t }: { t: ReturnType<typeof useTranslations> }) { return <div className="glass-panel rounded-xl p-10 text-center"><Search className="mx-auto h-7 w-7 text-slate-500" aria-hidden /><p className="mt-3 text-base font-semibold text-white">{t("workspace.noResults")}</p></div>; }
+function StatusDot({ status, t }: { status: CameraWallStatus, t: ReturnType<typeof useTranslations> }) { return <span className={cn("h-3 w-3 rounded-full border border-white/30", status === "live" ? "bg-emerald-400" : status === "attention" ? "bg-amber-400" : status === "offline" ? "bg-slate-400" : "bg-rose-400")} aria-label={statusCopy(status, t)} />; }
 function statusPillClass(status: CameraWallStatus) { return cn("mt-1 inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold", status === "live" ? "bg-emerald-400/15 text-emerald-200" : status === "attention" ? "bg-amber-300/15 text-amber-100" : status === "offline" ? "bg-slate-300/15 text-slate-200" : "bg-rose-400/15 text-rose-100"); }
-function CameraWallFooter({ counts, status }: { counts: { total: number; live: number; attention: number; offline: number }; status: "connected" | "degraded" | "unavailable" | "loading" }) { const label = status === "connected" ? "System connected" : status === "degraded" ? "System degraded" : status === "unavailable" ? "System unavailable" : "Checking system"; return <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-4 text-sm text-slate-400"><span className="inline-flex items-center gap-2"><span className={cn("h-3 w-3 rounded-full", status === "connected" ? "bg-emerald-400" : status === "degraded" || status === "loading" ? "bg-amber-300" : "bg-rose-400")} />{label}</span><span>{counts.total} cameras · {counts.live} live · {counts.attention} need attention · {counts.offline} offline</span></footer>; }
+
 
 export const cameraWallInternals = { cameraDisplayName, cameraStatus, buildReviewItems, cameraCoordinates, CAMERAS_PER_PAGE };

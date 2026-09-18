@@ -120,14 +120,15 @@ class ToolAuditRecord(LiveModel):
 
 class BrowserVoiceEnvelope(LiveModel):
     version: Literal["1.0"] = "1.0"
-    type: Literal["audio", "text", "audio_end", "interrupt", "stop", "ping"]
+    type: Literal["audio", "text", "audio_end", "interrupt", "stop", "ping", "scene_context"]
     data: Optional[str] = None
     mime_type: Optional[str] = Field(default=None, alias="mimeType")
 
 
 class ServerVoiceEnvelope(LiveModel):
     version: Literal["1.0"] = "1.0"
-    type: Literal["session_ready", "state", "transcript", "citations", "ui_command", "tool_activity", "turn_complete", "interrupted", "error", "pong"]
+    type: Literal["session_ready", "state", "transcript", "citations", "ui_command", "tool_activity", "turn_complete", "interrupted", "error", "pong", "projection"]
+    projection: Optional[Dict[str, Any]] = None
     state: Optional[VoiceState] = None
     session_id: Optional[str] = Field(default=None, alias="sessionId")
     input_sample_rate: Optional[int] = Field(default=None, alias="inputSampleRate")

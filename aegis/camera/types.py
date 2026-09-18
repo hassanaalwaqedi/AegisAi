@@ -55,6 +55,11 @@ class CameraConfig:
     video_id: Optional[str] = None
     connection_timeout: float = 5.0
     max_retries: int = 10
+    auto_start: bool = False
+    credential_ref: Optional[str] = None
+    stream_identity: Optional[str] = None
+    verification_status: str = "unverified"
+    last_connection_test: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -72,6 +77,9 @@ class CameraConfig:
             "video_id": self.video_id,
             "connection_timeout": self.connection_timeout,
             "max_retries": self.max_retries,
+            "auto_start": self.auto_start,
+            "verification_status": self.verification_status,
+            "last_connection_test": self.last_connection_test,
             "metadata": self.metadata,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -82,6 +90,17 @@ class CameraConfig:
         data["source_type"] = self.source_type.value
         data["url"] = self.url
         data["upload_path"] = self.upload_path
+        data["credential_ref"] = self.credential_ref
+        data["stream_identity"] = self.stream_identity
+        return data
+
+    def to_persisted_dict(self) -> Dict[str, Any]:
+        """Serialize config without embedding stream credentials in the registry."""
+        from aegis.camera.utils import redact_url_for_persistence
+
+        data = self.to_private_dict()
+        if self.credential_ref:
+            data["url"] = redact_url_for_persistence(self.url)
         return data
 
     @classmethod

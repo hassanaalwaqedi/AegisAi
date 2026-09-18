@@ -12,7 +12,7 @@ export function Badge({ className, variant = "default", ...props }: BadgeProps) 
         variant === "default" && "border-slate-500/30 bg-slate-400/10 text-slate-200",
         variant === "success" && "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
         variant === "warning" && "border-amber-400/35 bg-amber-400/10 text-amber-200",
-        variant === "danger" && "border-rose-400/35 bg-rose-400/10 text-rose-200",
+        variant === "danger" && "border-eose-400/35 bg-rose-400/10 text-rose-200",
         variant === "critical" && "border-fuchsia-300/35 bg-fuchsia-400/10 text-fuchsia-100",
         variant === "outline" && "border-white/15 bg-transparent text-slate-300",
         className

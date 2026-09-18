@@ -8,20 +8,28 @@ from aegis.pipeline.detection import DetectionStage
 
 
 def test_preload_model_uses_the_stage_configuration_and_loads_real_weights_boundary(monkeypatch):
-    import aegis.detection.yolo_detector as detector_module
+    import aegis.detection.multi_model_detector as detector_module
 
     captured = {}
 
     class FakeDetector:
         def __init__(self, *, detection_config):
             captured["config"] = detection_config
+            self.person_detector = self
+            self.weapon_detector = self
 
         @property
         def model(self):
             captured["weights_loaded"] = True
             return object()
 
-    monkeypatch.setattr(detector_module, "YOLODetector", FakeDetector)
+        def get_capabilities(self):
+            return {"weapon_detection_supported": False}
+
+        def get_model_capabilities(self):
+            return {"weapon_detection_supported": True}
+
+    monkeypatch.setattr(detector_module, "MultiModelDetector", FakeDetector)
     stage = DetectionStage(model_path="verified-yolo.pt", confidence=0.61)
 
     stage.preload_model()
@@ -34,17 +42,22 @@ def test_preload_model_uses_the_stage_configuration_and_loads_real_weights_bound
 
 
 def test_preload_model_retains_a_truthful_failure_reason(monkeypatch):
-    import aegis.detection.yolo_detector as detector_module
+    import aegis.detection.multi_model_detector as detector_module
 
     class FailingDetector:
         def __init__(self, *, detection_config):
             del detection_config
+            self.person_detector = self
+            self.weapon_detector = self
 
         @property
         def model(self):
             raise FileNotFoundError("verified-yolo.pt")
 
-    monkeypatch.setattr(detector_module, "YOLODetector", FailingDetector)
+        def get_capabilities(self):
+            return {"weapon_detection_supported": False}
+
+    monkeypatch.setattr(detector_module, "MultiModelDetector", FailingDetector)
     stage = DetectionStage(model_path="verified-yolo.pt")
 
     with pytest.raises(FileNotFoundError):

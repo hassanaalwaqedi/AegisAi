@@ -1,6 +1,6 @@
 "use client";
 
-import { resolveWebSocketUrl } from "@/lib/config";
+import { createAuthenticatedWebSocket, resolveWebSocketUrl } from "@/lib/config";
 import { AegisClientError } from "@/lib/errors";
 import { websocketMessageSchema } from "@/lib/schemas";
 import type { WebSocketConnectionState, WebSocketMessage } from "@/types";
@@ -25,6 +25,10 @@ export class AegisWebSocketClient {
   }
 
   connect() {
+    void this.connectAuthenticated();
+  }
+
+  private async connectAuthenticated() {
     if (!this.url) {
       this.listener.onStateChange("error");
       this.listener.onError(
@@ -37,7 +41,11 @@ export class AegisWebSocketClient {
     this.listener.onStateChange(this.reconnectAttempts > 0 ? "reconnecting" : "connecting");
 
     try {
-      this.socket = new WebSocket(this.url);
+      this.socket = await createAuthenticatedWebSocket(this.url);
+      if (this.closedByConsumer) {
+        this.socket.close();
+        return;
+      }
     } catch (error) {
       this.listener.onStateChange("error");
       this.listener.onError(error instanceof Error ? error : new Error("WebSocket failed to initialize."));

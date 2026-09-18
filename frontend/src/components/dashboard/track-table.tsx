@@ -1,7 +1,7 @@
 import { RiskBadge } from "@/components/dashboard/risk-badge";
 import { EmptyState } from "@/components/layout/states";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
-import { formatDecimal, formatPercent, formatTimestamp, getTrackBehaviors, getTrackLastSeen, getTrackObjectName } from "@/lib/data-format";
+import { formatDecimal, formatOperatorLabel, formatOperatorList, formatPercent, formatTimestamp, getTrackBehaviors, getTrackLastSeen, getTrackObjectName } from "@/lib/data-format";
 import type { Track } from "@/types";
 
 type TrackTableProps = {
@@ -15,9 +15,9 @@ type TrackTableProps = {
 export function TrackTable({
   tracks,
   title = "Active Tracks",
-  description = "Validated from GET /tracks or live WebSocket messages",
-  emptyTitle = "No active tracks returned",
-  emptyDescription = "GET /tracks returned an empty track list. No detections are shown until the backend reports tracked objects."
+  description = "Current tracked activity from live cameras.",
+  emptyTitle = "No active movement right now",
+  emptyDescription = "Tracked activity will appear here when movement is detected."
 }: TrackTableProps) {
   if (tracks.length === 0) {
     return (
@@ -37,22 +37,22 @@ export function TrackTable({
         </div>
       </CardHeader>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[1700px] border-collapse text-left text-sm">
+        <table className="w-full min-w-[1700px] border-collapse text-start text-sm">
           <thead className="border-y border-white/10 bg-white/[0.035] text-xs uppercase text-slate-500">
             <tr>
-              <th className="px-5 py-3 font-medium">Track ID</th>
-              <th className="px-5 py-3 font-medium">Class</th>
+              <th className="px-5 py-3 font-medium">Tracking ID</th>
+              <th className="px-5 py-3 font-medium">Activity</th>
               <th className="px-5 py-3 font-medium">Confidence</th>
               <th className="px-5 py-3 font-medium">Risk</th>
               <th className="px-5 py-3 font-medium">Verification</th>
               <th className="px-5 py-3 font-medium">Evidence</th>
               <th className="px-5 py-3 font-medium">Association</th>
-              <th className="px-5 py-3 font-medium">Model source</th>
-              <th className="px-5 py-3 font-medium">Reason codes</th>
+              <th className="px-5 py-3 font-medium">Activity source</th>
+              <th className="px-5 py-3 font-medium">Why it needs review</th>
               <th className="px-5 py-3 font-medium">Behavior</th>
               <th className="px-5 py-3 font-medium">Explanation</th>
               <th className="px-5 py-3 font-medium">Movement</th>
-              <th className="px-5 py-3 font-medium">BBox</th>
+              <th className="px-5 py-3 font-medium">Observed area</th>
               <th className="px-5 py-3 font-medium">Last Seen</th>
             </tr>
           </thead>
@@ -70,17 +70,17 @@ export function TrackTable({
                       <span className="text-xs text-slate-500">Score {formatDecimal(track.risk_score, 2)}</span>
                     </div>
                   </td>
-                  <td className="px-5 py-4 text-slate-300">{track.verification_status ?? "Not returned"}</td>
-                  <td className="px-5 py-4 text-slate-300">{track.evidence_type ?? "Not returned"}</td>
+                  <td className="px-5 py-4 text-slate-300">{formatOperatorLabel(track.verification_status)}</td>
+                  <td className="px-5 py-4 text-slate-300">{formatOperatorLabel(track.evidence_type)}</td>
                   <td className="px-5 py-4 text-slate-300">
                     {formatAssociation(track)}
                   </td>
-                  <td className="px-5 py-4 text-slate-300">{formatList(track.model_source)}</td>
-                  <td className="px-5 py-4 text-slate-300">{formatList(track.reason_codes)}</td>
-                  <td className="px-5 py-4 text-slate-300">{behaviors.length ? behaviors.join(", ") : "Not returned"}</td>
-                  <td className="px-5 py-4 text-slate-300">{track.risk_explanation ?? "Not returned"}</td>
-                  <td className="px-5 py-4 text-slate-300">{track.movement_state ?? "Not returned"}</td>
-                  <td className="px-5 py-4 font-mono text-xs text-slate-300">{track.bbox ? track.bbox.join(", ") : "Not returned"}</td>
+                  <td className="px-5 py-4 text-slate-300">{formatOperatorList(track.model_source)}</td>
+                  <td className="px-5 py-4 text-slate-300">{formatOperatorList(track.reason_codes)}</td>
+                  <td className="px-5 py-4 text-slate-300">{behaviors.length ? formatOperatorList(behaviors) : "Unavailable"}</td>
+                  <td className="px-5 py-4 text-slate-300">{track.risk_explanation ?? "Unavailable"}</td>
+                  <td className="px-5 py-4 text-slate-300">{track.movement_state ?? "Unavailable"}</td>
+                  <td className="px-5 py-4 font-mono text-xs text-slate-300">{track.bbox ? track.bbox.join(", ") : "Unavailable"}</td>
                   <td className="px-5 py-4 text-slate-300">{formatTimestamp(getTrackLastSeen(track))}</td>
                 </tr>
               );
@@ -92,18 +92,14 @@ export function TrackTable({
   );
 }
 
-function formatList(values?: string[]) {
-  return values?.length ? values.join(", ") : "Not returned";
-}
-
 function formatAssociation(track: Track) {
   if (!track.association_type) {
     if (track.is_weapon) return "No person association";
-    return "Not returned";
+    return "Unavailable";
   }
 
   const target = track.person_track_id ? `Person #${track.person_track_id}` : track.weapon_track_id ? `Weapon #${track.weapon_track_id}` : "associated object";
-  const score = typeof track.association_score === "number" ? `score ${formatDecimal(track.association_score, 2)}` : "score not returned";
-  const frames = typeof track.stable_frames === "number" ? `${track.stable_frames} frames` : "frames not returned";
-  return `${track.association_type} with ${target} (${score}, ${frames})`;
+  const score = typeof track.association_score === "number" ? `confidence ${formatDecimal(track.association_score, 2)}` : "confidence unavailable";
+  const frames = typeof track.stable_frames === "number" ? `${track.stable_frames} frames` : "duration unavailable";
+  return `${formatOperatorLabel(track.association_type)} with ${target} (${score}, ${frames})`;
 }

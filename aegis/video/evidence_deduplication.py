@@ -31,18 +31,35 @@ class EvidenceDeduplicator:
             import imagehash
             fingerprint = imagehash.phash(Image.fromarray(frame[:, :, ::-1] if frame.ndim == 3 else frame))
         except ImportError:
-            return DeduplicationDecision(False, "imagehash_unavailable")
+            # Keep the same local, deterministic behaviour when the optional
+            # imagehash package is absent.  This is a compact average-hash,
+            # not an AI inference or fabricated evidence decision.
+            grayscale = frame.mean(axis=2) if frame.ndim == 3 else frame
+            height, width = grayscale.shape[:2]
+            if height == 0 or width == 0:
+                return DeduplicationDecision(False, "invalid_frame")
+            y_indices = np.linspace(0, height - 1, num=8, dtype=int)
+            x_indices = np.linspace(0, width - 1, num=8, dtype=int)
+            thumbnail = grayscale[np.ix_(y_indices, x_indices)]
+            fingerprint = int("".join("1" if value >= thumbnail.mean() else "0" for value in thumbnail.ravel()), 2)
         current = time.monotonic() if now is None else now
         self._prune(current)
         key = (camera_id, track_id)
         prior = self._recent.get(key)
-        if prior and abs(prior[1] - fingerprint) <= self.max_distance:
+        if prior and self._distance(prior[1], fingerprint) <= self.max_distance:
             return DeduplicationDecision(True, "near_duplicate")
         self._recent[key] = (current, fingerprint)
         self._recent.move_to_end(key)
         while len(self._recent) > self.cache_limit:
             self._recent.popitem(last=False)
         return DeduplicationDecision(False, "new_evidence")
+
+    @staticmethod
+    def _distance(first: object, second: object) -> int:
+        """Return a Hamming-style distance for imagehash and local hashes."""
+        if isinstance(first, int) and isinstance(second, int):
+            return (first ^ second).bit_count()
+        return int(abs(first - second))
 
     def _prune(self, current: float) -> None:
         expired = [key for key, (saved, _) in self._recent.items() if current - saved > self.retention_seconds]

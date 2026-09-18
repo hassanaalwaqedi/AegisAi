@@ -41,10 +41,14 @@ class DeviceType(str, Enum):
 class DetectionSettings(BaseSettings):
     """YOLO Detection Configuration."""
 
-    model_path: str = Field("yolo11n.pt", description="Path to YOLO model weights")
+    model_path: str = Field(
+        "yolo11n.pt",
+        description="Path to YOLO model weights",
+        validation_alias="AEGIS_DETECTION_MODEL_PATH",
+    )
     confidence_threshold: float = Field(0.5, ge=0.0, le=1.0)
     nms_threshold: float = Field(0.45, ge=0.0, le=1.0)
-    target_classes: Tuple[int, ...] = (0, 2, 3, 5, 7, 14, 15, 16)
+    target_classes: Tuple[int, ...] = (0, 2, 3, 5, 7, 14, 15, 16, 34, 43, 76)
     image_size: int = Field(640, ge=320, le=1280)
     frame_skip: int = Field(1, ge=1)
     half_precision: bool = False
@@ -53,11 +57,23 @@ class DetectionSettings(BaseSettings):
     weapon_model_path: str = Field(
         default="models/weapon_detector.pt",
         description="Path to weapon detector weights. Set via AEGIS_WEAPON_MODEL_PATH.",
+        validation_alias="AEGIS_WEAPON_MODEL_PATH",
     )
-    weapon_confidence_threshold: float = Field(0.5, ge=0.0, le=1.0)
-    weapon_classes: Tuple[int, ...] = ()
-    weapon_model_class_names: Dict[int, str] = {0: "knife", 1: "pistol"}
-    weapon_internal_class_ids: Dict[int, int] = {0: 1000, 1: 1001}
+    weapon_confidence_threshold: float = Field(
+        0.35,
+        ge=0.0,
+        le=1.0,
+        validation_alias="AEGIS_WEAPON_CONFIDENCE_THRESHOLD",
+    )
+    weapon_classes: Tuple[int, ...] = (34, 43, 76)
+    weapon_model_class_names: Dict[int, str] = Field(
+        default={0: "knife", 1: "pistol"},
+        validation_alias="AEGIS_WEAPON_CLASS_NAMES_JSON",
+    )
+    weapon_internal_class_ids: Dict[int, int] = Field(
+        default={0: 1000, 1: 1001},
+        validation_alias="AEGIS_WEAPON_INTERNAL_CLASS_IDS_JSON",
+    )
     weapon_debug_enabled: bool = True
 
     # Animal classes for filtering false positives (COCO: bird, cat, dog)
@@ -67,6 +83,7 @@ class DetectionSettings(BaseSettings):
     class_names: Dict[int, str] = {
         0: "Person", 2: "Car", 3: "Motorcycle", 5: "Bus",
         7: "Truck", 14: "Bird", 15: "Cat", 16: "Dog",
+        34: "Baseball Bat", 43: "Knife", 76: "Scissors",
     }
 
     model_config = {"env_prefix": "AEGIS_DETECTION_"}
@@ -295,7 +312,7 @@ class ByteTrackSettings(BaseSettings):
 
     track_activation_threshold: float = 0.25
     lost_track_buffer: int = 30
-    minimum_matching_threshold: float = 0.8
+    minimum_matching_threshold: float = 0.3
     frame_rate: int = 30
 
     model_config = {"env_prefix": "AEGIS_BYTETRACK_"}
@@ -343,6 +360,8 @@ class GeminiLiveSettings(BaseSettings):
     # These are current Gemini Live defaults. Operators can replace either
     # value through the corresponding GEMINI_LIVE_* environment variable.
     model: str = "gemini-3.1-flash-live-preview"
+    # Kore is the established Aegis Live voice. This may be overridden with
+    # GEMINI_LIVE_VOICE.
     voice: str = "Kore"
     # PCM is kept explicit at the gateway boundary.  Gemini Live accepts the
     # input rate in the MIME type; the browser needs the output rate to queue

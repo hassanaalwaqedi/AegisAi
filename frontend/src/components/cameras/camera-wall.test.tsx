@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render as renderComponent, screen } from "@testing-library/react";
 
 vi.mock("@/components/cameras/camera-command-center", () => ({
-  CameraCommandCenter: ({ camera }: { camera: { name?: string } }) => <div>Focused player: {camera.name}</div>,
+  CameraCommandCenter: ({ camera, cameraSwitcher }: { camera: { name?: string }; cameraSwitcher?: React.ReactNode }) => <><div>Focused player: {camera.name}</div>{cameraSwitcher}</>,
 }));
 
 import { CameraPreview, CameraWall, cameraWallInternals } from "./camera-wall";
+
+import { NextIntlClientProvider } from "next-intl";
+import messages from "../../../messages/en.json";
+
+function render(ui: React.ReactNode) {
+  return renderComponent(<NextIntlClientProvider locale="en" messages={messages}>{ui}</NextIntlClientProvider>);
+}
 
 class MockIntersectionObserver {
   constructor(private readonly callback: IntersectionObserverCallback) {}
@@ -18,7 +25,7 @@ class MockIntersectionObserver {
   thresholds = [];
 }
 
-const camera = (index: number, status: "online" | "offline" | "reconnecting" = "online") => ({
+const camera = (index: number, status: "online" | "offline" | "reconnecting" | "connecting" = "online") => ({
   camera_id: `camera-internal-${index}`,
   name: `Camera ${index}`,
   source_type: "HTTP_STREAM" as const,
@@ -56,7 +63,7 @@ describe("CameraWall", () => {
 
     expect(screen.getByRole("button", { name: "Grid" })).toBeInTheDocument();
     expect(document.querySelectorAll("[data-camera-tile]")).toHaveLength(9);
-    expect(screen.getByText("10 cameras")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "All cameras 10" })).toBeInTheDocument();
     expect(screen.getByText("Selected")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open Camera 1 in Focus mode" })).toHaveClass("border-signal-cyan");
     expect(screen.queryByText("camera-internal-1")).not.toBeInTheDocument();
@@ -83,20 +90,25 @@ describe("CameraWall", () => {
     expect(screen.getByText("Camera 10")).toBeInTheDocument();
   });
 
-  it("opens focus mode and makes review queue actions select the real camera", () => {
+  it("opens focus mode without rendering a duplicate review queue", () => {
     const { onCameraChange, onViewChange } = renderWall();
+    expect(screen.queryByRole("heading", { name: "Needs review" })).not.toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: /Open Camera 2 in Focus mode/i }));
     expect(onCameraChange).toHaveBeenCalledWith("camera-internal-2");
     expect(onViewChange).toHaveBeenCalledWith("focus");
     expect(screen.getByText("Focused player: Camera 2")).toBeInTheDocument();
-
-    fireEvent.click(screen.getAllByRole("button", { name: "Review" })[0]);
-    expect(onViewChange).toHaveBeenCalledWith("focus");
+    expect(screen.getByLabelText("Focus camera thumbnails")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Camera 2" })).toHaveClass("border-signal-cyan");
+    expect(screen.queryByRole("heading", { name: "Camera Wall" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Needs review" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Review queue")).not.toBeInTheDocument();
   });
 
   it("honours a URL-backed Focus selection on initial render", () => {
     renderWall({ initialView: "focus", initialCameraId: "camera-internal-4" });
     expect(screen.getByText("Focused player: Camera 4")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Camera 4" })).toHaveClass("border-signal-cyan");
   });
 
   it("returns from Focus to Grid and switches the real selected camera from its thumbnail rail", () => {
@@ -136,6 +148,12 @@ describe("CameraWall", () => {
 
   it("shows the real delayed-frame state instead of presenting a reconnecting camera as live", () => {
     render(<CameraPreview camera={camera(9, "reconnecting")} status="attention" />);
+    expect(screen.getByText("Live image is delayed.")).toBeInTheDocument();
+    expect(document.querySelector("img")).not.toBeInTheDocument();
+  });
+
+  it("does not request snapshots before a connecting camera has delivered a frame", () => {
+    render(<CameraPreview camera={camera(9, "connecting")} status="attention" />);
     expect(screen.getByText("Live image is delayed.")).toBeInTheDocument();
     expect(document.querySelector("img")).not.toBeInTheDocument();
   });

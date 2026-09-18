@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render as renderComponent, screen } from "@testing-library/react";
 
 import { ActivityAlertsWorkspace } from "./activity-alerts-workspace";
 import { activityAlertsInternals } from "@/lib/activity-alerts";
 import type { Camera, RiskEvent } from "@/types";
+
+import { NextIntlClientProvider } from "next-intl";
+import messages from "../../../messages/en.json";
+function render(ui: React.ReactNode) {
+  return renderComponent(ui, { wrapper: ({ children }) => <NextIntlClientProvider locale="en" messages={messages}>{children}</NextIntlClientProvider> });
+}
 
 const liveCamera: Camera = {
   camera_id: "gate-2",
@@ -39,7 +45,7 @@ describe("ActivityAlertsWorkspace", () => {
   it("uses operator wording and keeps technical payload fields hidden until Details opens", () => {
     render(<ActivityAlertsWorkspace cameras={[liveCamera]} events={[highEvent]} isLoading={false} isUnavailable={false} camerasUnavailable={false} onRetry={() => {}} />);
 
-    expect(screen.getByRole("heading", { name: "Activity & Alerts" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Alerts" })).toBeInTheDocument();
     expect(screen.getAllByText("Vehicle activity needs review")).toHaveLength(2);
     expect(screen.queryByText("model-private-name")).not.toBeInTheDocument();
     expect(screen.queryByText("RAW_REASON_CODE")).not.toBeInTheDocument();
@@ -58,7 +64,7 @@ describe("ActivityAlertsWorkspace", () => {
     expect(queueItem).toHaveFocus();
     fireEvent.click(queueItem);
     expect(screen.getByRole("heading", { name: "North Gate" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Open camera/i })).toHaveAttribute("href", "/cameras?camera=gate-2&view=focus");
+    expect(screen.getByRole("link", { name: /Open camera/i })).toHaveAttribute("href", "/en/cameras?camera=gate-2&view=focus");
   });
 
   it("shows real camera-offline states without inventing visual evidence", () => {
@@ -87,6 +93,22 @@ describe("ActivityAlertsWorkspace", () => {
     expect(screen.getByText("Activity is temporarily unavailable.")).toBeInTheDocument();
     screen.getByRole("button", { name: "Retry" }).click();
     expect(onRetry).toHaveBeenCalledOnce();
+  });
+
+  it("keeps saved evidence available when camera details cannot be loaded", () => {
+    render(<ActivityAlertsWorkspace cameras={[]} events={[{ ...highEvent, snapshot_status: "saved" }]} isLoading={false} isUnavailable={false} camerasUnavailable onRetry={() => {}} />);
+    expect(screen.getByRole("img")).toHaveAttribute("src", expect.stringContaining("/events/evidence/event-9/snapshot"));
+    expect(screen.queryByRole("link", { name: /Open camera/i })).not.toBeInTheDocument();
+  });
+
+  it("filters activity and returns from a selected item to the list", () => {
+    render(<ActivityAlertsWorkspace cameras={[liveCamera, offlineCamera]} events={[highEvent]} isLoading={false} isUnavailable={false} camerasUnavailable={false} onRetry={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Camera issues" }));
+    expect(screen.queryByRole("button", { name: /North Gate/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Parking East/i }));
+    expect(document.querySelector(".events-content")).toHaveClass("has-selection");
+    fireEvent.click(screen.getByRole("button", { name: "Back to activity" }));
+    expect(document.querySelector(".events-content")).not.toHaveClass("has-selection");
   });
 
   it("suppresses low-value normal detections and prioritises the returned review work", () => {

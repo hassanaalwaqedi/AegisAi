@@ -7,6 +7,7 @@ Covers Phase 1 (Perception) and Phase 2 (Analysis) configurations.
 Designed for production deployment with environment-aware settings.
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
@@ -21,7 +22,36 @@ def _float_env(name: str, default: float) -> float:
 
 
 WEAPON_MODEL_PATH = os.getenv("AEGIS_WEAPON_MODEL_PATH", os.path.join("models", "weapon_detector.pt"))
-WEAPON_CONFIDENCE_THRESHOLD = _float_env("AEGIS_WEAPON_CONFIDENCE_THRESHOLD", 0.5)
+WEAPON_CONFIDENCE_THRESHOLD = _float_env("AEGIS_WEAPON_CONFIDENCE_THRESHOLD", 0.35)
+
+
+def _int_string_map_env(name: str, default: dict) -> dict:
+    """Read a small JSON object with integer keys, retaining safe defaults."""
+    raw = os.getenv(name)
+    if not raw:
+        return dict(default)
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            return dict(default)
+        normalized = {int(key): str(value).strip() for key, value in parsed.items()}
+        return normalized if normalized and all(normalized.values()) else dict(default)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return dict(default)
+
+
+def _int_int_map_env(name: str, default: dict) -> dict:
+    raw = os.getenv(name)
+    if not raw:
+        return dict(default)
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            return dict(default)
+        normalized = {int(key): int(value) for key, value in parsed.items()}
+        return normalized if normalized else dict(default)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return dict(default)
 
 
 class DeviceType(Enum):
@@ -44,7 +74,7 @@ class DetectionConfig:
         confidence_threshold: Minimum confidence for valid detections
         nms_threshold: Non-Maximum Suppression IoU threshold
         target_classes: COCO class IDs to detect
-        weapon_classes: Class IDs for weapon objects (custom model)
+        weapon_classes: Base-model class IDs treated as weapon-like objects
         weapon_model_path: Path to the custom weapon detector weights
         weapon_confidence_threshold: Minimum confidence for weapon detections
         animal_classes: COCO class IDs for animals (filter false positives)
@@ -52,27 +82,30 @@ class DetectionConfig:
         frame_skip: Process every Nth frame (1=all, 2=every other, etc.)
         half_precision: Use FP16 inference (faster on GPU)
     """
-    model_path: str = "yolo11n.pt"
+    model_path: str = field(default_factory=lambda: os.getenv("AEGIS_DETECTION_MODEL_PATH", "yolo11n.pt"))
     confidence_threshold: float = 0.5
     nms_threshold: float = 0.45
-    target_classes: Tuple[int, ...] = (0, 2, 3, 5, 7, 14, 15, 16)
+    # COCO weapon-like classes are real outputs from yolo11n: baseball bat
+    # (34), knife (43), and scissors (76).  Firearms/general weapon classes
+    # still require the optional custom detector below.
+    target_classes: Tuple[int, ...] = (0, 2, 3, 5, 7, 14, 15, 16, 34, 43, 76)
     image_size: int = 640
     frame_skip: int = 1
     half_precision: bool = False  # CPU-safe default; enable on GPU
     
-    # Weapon detection class IDs (custom-trained model)
-    # These map to custom weapon model outputs
-    weapon_classes: Tuple[int, ...] = ()
+    # Weapon-like class IDs emitted by the base COCO detector. Custom-model
+    # source IDs are mapped separately through weapon_internal_class_ids.
+    weapon_classes: Tuple[int, ...] = (34, 43, 76)
     weapon_model_path: str = WEAPON_MODEL_PATH
     weapon_confidence_threshold: float = WEAPON_CONFIDENCE_THRESHOLD
-    weapon_model_class_names: dict = field(default_factory=lambda: {
-        0: "knife",
-        1: "pistol",
-    })
-    weapon_internal_class_ids: dict = field(default_factory=lambda: {
-        0: 1000,
-        1: 1001,
-    })
+    weapon_model_class_names: dict = field(default_factory=lambda: _int_string_map_env(
+        "AEGIS_WEAPON_CLASS_NAMES_JSON",
+        {0: "knife", 1: "pistol"},
+    ))
+    weapon_internal_class_ids: dict = field(default_factory=lambda: _int_int_map_env(
+        "AEGIS_WEAPON_INTERNAL_CLASS_IDS_JSON",
+        {0: 1000, 1: 1001},
+    ))
     weapon_debug_enabled: bool = True
     
     # COCO animal classes for filtering false positives
@@ -89,6 +122,9 @@ class DetectionConfig:
         14: "Bird",
         15: "Cat",
         16: "Dog",
+        34: "Baseball Bat",
+        43: "Knife",
+        76: "Scissors",
     })
 
 

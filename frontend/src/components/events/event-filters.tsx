@@ -18,7 +18,7 @@ type EventFiltersProps = {
 };
 
 export function EventFiltersBar({ events, value, onChange }: EventFiltersProps) {
-  const objectTypes = Array.from(new Set(events.map(getEventObject).filter((item) => item !== "Not returned"))).sort();
+  const objectTypes = Array.from(new Set(events.map(getEventObject).filter((item) => item !== "Unavailable"))).sort();
 
   return (
     <div className="grid gap-3 rounded-lg border border-white/10 bg-white/[0.04] p-4 sm:grid-cols-2 xl:grid-cols-4">

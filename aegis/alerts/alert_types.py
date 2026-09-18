@@ -103,6 +103,10 @@ class Alert:
     factors: List[str] = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.now)
     acknowledged: bool = False
+    delivery_status: str = "created"
+    delivery_attempts: int = 0
+    delivered_at: Optional[datetime] = None
+    last_delivery_error: Optional[str] = None
     
     @classmethod
     def generate_id(cls) -> str:
@@ -122,7 +126,11 @@ class Alert:
             "message": self.message,
             "factors": self.factors,
             "timestamp": self.timestamp.isoformat(),
-            "acknowledged": self.acknowledged
+            "acknowledged": self.acknowledged,
+            "delivery_status": self.delivery_status,
+            "delivery_attempts": self.delivery_attempts,
+            "delivered_at": self.delivered_at.isoformat() if self.delivered_at else None,
+            "last_delivery_error": self.last_delivery_error,
         }
     
     def to_log_string(self) -> str:

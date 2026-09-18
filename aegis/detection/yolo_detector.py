@@ -104,6 +104,9 @@ class YOLODetector:
         
         self._model: Optional[YOLO] = None
         self._class_names = dict(self._config.CLASS_NAMES)
+        self._available_class_ids: Optional[set[int]] = None
+        self._validated_weapon_classes: Optional[set[int]] = None
+        self._model_load_error: Optional[str] = None
         
         logger.info(
             f"YOLODetector initialized with model={self._config.model_path}, "
@@ -124,14 +127,92 @@ class YOLODetector:
             Loaded YOLO model instance
         """
         if self._model is None:
+            model_path = Path(self._config.model_path)
+            if not model_path.is_file():
+                self._model_load_error = f"Base detector weights are unavailable: {model_path}"
+                raise FileNotFoundError(self._model_load_error)
             logger.info(f"Loading YOLO model: {self._config.model_path}")
-            self._model = YOLO(self._config.model_path)
+            try:
+                model = YOLO(str(model_path))
+                self._validate_model_labels(model)
+                self._model = model
+                self._model_load_error = None
+            except Exception as exc:
+                self._model_load_error = f"{type(exc).__name__}: {exc}"
+                raise
             
             # Log device information
             if hasattr(self._model, 'device'):
                 logger.info(f"Model loaded on device: {self._model.device}")
         
         return self._model
+
+    def _validate_model_labels(self, model: YOLO) -> None:
+        """Use model-owned labels so configured IDs cannot be silently misnamed."""
+        raw_names = getattr(model, "names", None)
+        if isinstance(raw_names, (list, tuple)):
+            actual_names = {index: str(name) for index, name in enumerate(raw_names)}
+        elif isinstance(raw_names, dict):
+            actual_names = {int(index): str(name) for index, name in raw_names.items()}
+        else:
+            logger.warning("Model %s does not expose class labels; using configured labels", self._config.model_path)
+            return
+
+        self._available_class_ids = set(actual_names)
+        validated_weapons: set[int] = set()
+        for class_id in self._config.weapon_classes:
+            expected = self._config.CLASS_NAMES.get(class_id)
+            actual = actual_names.get(class_id)
+            if expected and actual and self._normalize_label(expected) == self._normalize_label(actual):
+                validated_weapons.add(class_id)
+            else:
+                logger.warning(
+                    "Configured weapon class id=%s label=%r does not match model label=%r; class disabled",
+                    class_id,
+                    expected,
+                    actual,
+                )
+        self._validated_weapon_classes = validated_weapons
+        self._class_names.update(actual_names)
+
+    @staticmethod
+    def _normalize_label(value: str) -> str:
+        return " ".join(str(value).strip().lower().replace("_", " ").split())
+
+    def get_capabilities(self) -> dict:
+        model_available = Path(self._config.model_path).is_file()
+        target_ids = set(self._config.target_classes)
+        if self._available_class_ids is not None:
+            target_ids &= self._available_class_ids
+        weapon_ids = (
+            set(self._config.weapon_classes)
+            if self._validated_weapon_classes is None
+            else set(self._validated_weapon_classes)
+        )
+        weapon_ids &= target_ids
+        return {
+            "model_name": self._config.model_path,
+            "detector_available": model_available,
+            "loaded": self._model is not None,
+            "availability": (
+                "ready" if self._model is not None else "configured_not_loaded" if model_available else "unavailable"
+            ),
+            "unavailable_reason": self._model_load_error if not model_available else self._model_load_error,
+            "supported_classes": [
+                self._class_names.get(class_id, f"class_{class_id}")
+                for class_id in sorted(target_ids)
+            ],
+            "weapon_classes": [
+                self._class_names.get(class_id, f"class_{class_id}")
+                for class_id in sorted(weapon_ids)
+            ],
+            "weapon_detection_supported": model_available and bool(weapon_ids),
+            "class_mapping_validation": (
+                "configured_not_loaded"
+                if self._available_class_ids is None
+                else "validated"
+            ),
+        }
     
     def detect(
         self,
@@ -155,13 +236,25 @@ class YOLODetector:
             (persons and vehicles by default).
         """
         # Use configured values if not overridden
-        conf_thresh = confidence_threshold or self._config.confidence_threshold
+        explicit_threshold = confidence_threshold is not None
+        conf_thresh = self._config.confidence_threshold if confidence_threshold is None else confidence_threshold
         target_classes = classes or self._config.target_classes
+        model = self.model
+        if self._available_class_ids is not None:
+            target_classes = tuple(class_id for class_id in target_classes if class_id in self._available_class_ids)
+        weapon_classes = (
+            set(self._config.weapon_classes)
+            if self._validated_weapon_classes is None
+            else self._validated_weapon_classes
+        )
+        includes_weapon_classes = bool(set(target_classes) & weapon_classes)
+        weapon_threshold = conf_thresh if explicit_threshold else self._config.weapon_confidence_threshold
+        inference_threshold = min(conf_thresh, weapon_threshold) if includes_weapon_classes else conf_thresh
         
         # Run inference with optimizations
-        results = self.model.predict(
+        results = model.predict(
             source=frame,
-            conf=conf_thresh,
+            conf=inference_threshold,
             iou=self._config.nms_threshold,
             classes=list(target_classes),
             imgsz=self._config.image_size,
@@ -194,9 +287,12 @@ class YOLODetector:
                 
                 # Classify object category
                 is_person = (cls_id == 0)
-                is_weapon = (cls_id in self._config.weapon_classes)
+                is_weapon = cls_id in weapon_classes
                 is_animal = (cls_id in self._config.animal_classes)
                 is_vehicle = cls_id in (2, 3, 5, 7)
+                class_threshold = weapon_threshold if is_weapon else conf_thresh
+                if conf < class_threshold:
+                    continue
                 
                 if is_person:
                     category = "person"
@@ -245,14 +341,27 @@ class YOLODetector:
         Returns:
             List of detection lists, one per input frame
         """
-        conf_thresh = confidence_threshold or self._config.confidence_threshold
+        explicit_threshold = confidence_threshold is not None
+        conf_thresh = self._config.confidence_threshold if confidence_threshold is None else confidence_threshold
+        model = self.model
+        target_classes = self._config.target_classes
+        if self._available_class_ids is not None:
+            target_classes = tuple(class_id for class_id in target_classes if class_id in self._available_class_ids)
+        weapon_classes = (
+            set(self._config.weapon_classes)
+            if self._validated_weapon_classes is None
+            else self._validated_weapon_classes
+        )
+        includes_weapon_classes = bool(set(target_classes) & weapon_classes)
+        weapon_threshold = conf_thresh if explicit_threshold else self._config.weapon_confidence_threshold
+        inference_threshold = min(conf_thresh, weapon_threshold) if includes_weapon_classes else conf_thresh
         
         # Run batch inference
-        results = self.model.predict(
+        results = model.predict(
             source=frames,
-            conf=conf_thresh,
+            conf=inference_threshold,
             iou=self._config.nms_threshold,
-            classes=list(self._config.target_classes),
+            classes=list(target_classes),
             imgsz=self._config.image_size,
             device=self._device if self._device else None,
             verbose=False
@@ -273,12 +382,34 @@ class YOLODetector:
                     conf = float(boxes.conf[i].cpu().numpy())
                     cls_id = int(boxes.cls[i].cpu().numpy())
                     cls_name = self._class_names.get(cls_id, f"class_{cls_id}")
+                    is_person = cls_id == 0
+                    is_weapon = cls_id in weapon_classes
+                    is_animal = cls_id in self._config.animal_classes
+                    is_vehicle = cls_id in (2, 3, 5, 7)
+                    class_threshold = weapon_threshold if is_weapon else conf_thresh
+                    if conf < class_threshold:
+                        continue
+                    if is_person:
+                        category = "person"
+                    elif is_weapon:
+                        category = "weapon"
+                    elif is_animal:
+                        category = "animal"
+                    elif is_vehicle:
+                        category = "vehicle"
+                    else:
+                        category = "generic"
                     
                     detection = Detection(
                         bbox=(x1, y1, x2, y2),
                         confidence=conf,
                         class_id=cls_id,
                         class_name=cls_name,
+                        object_category=category,
+                        is_weapon=is_weapon,
+                        is_person=is_person,
+                        is_vehicle=is_vehicle,
+                        is_animal=is_animal,
                         model_source=self._config.model_path,
                         source_class_id=cls_id,
                     )

@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const testState = vi.hoisted(() => ({
   fetchCapabilities: vi.fn(),
+  fetchPersistedEvidence: vi.fn(),
+  fetchActiveIncidents: vi.fn(),
   sendChatMessage: vi.fn(),
   callbacks: null as any,
   voice: {
@@ -44,6 +46,12 @@ vi.mock("@/lib/ai-api", () => ({
   sendChatMessage: (...args: unknown[]) => testState.sendChatMessage(...args),
 }));
 
+vi.mock("@/lib/evidence-api", () => ({
+  fetchRecentPersistedEvidence: (...args: unknown[]) => testState.fetchPersistedEvidence(...args),
+  fetchActiveIncidents: (...args: unknown[]) => testState.fetchActiveIncidents(...args),
+  persistedEvidenceSnapshotUrl: () => null,
+}));
+
 vi.mock("@/components/intelligence/AIOrb", () => ({
   default: ({ voiceState, activeCapability, onActivate, onListenToggle, voiceSessionActive }: { voiceState: string; activeCapability?: string; onActivate: () => void; onListenToggle: () => void; voiceSessionActive: boolean }) => (
     <div>
@@ -78,6 +86,8 @@ function renderCore() {
 
 beforeEach(() => {
   testState.fetchCapabilities.mockResolvedValue(capability);
+  testState.fetchPersistedEvidence.mockResolvedValue([]);
+  testState.fetchActiveIncidents.mockResolvedValue([]);
   Object.assign(testState.voice, {
     state: "off", error: null, waveformLevel: 0, playbackLevel: 0, captureMode: null, isCapturing: false,
     sessionPhase: "idle", sessionOutcome: null, sessionSecondsRemaining: 0, sessionActive: false,
@@ -142,6 +152,13 @@ describe("AegisVoiceCore", () => {
 
     expect(screen.getByRole("progressbar", { name: /voice session time remaining/i })).toHaveAttribute("aria-valuenow", "42");
     expect(screen.getByText(/42s remaining/i)).toBeInTheDocument();
+
+    testState.voice.state = "speaking";
+    testState.voice.sessionPhase = "response";
+    testState.voice.sessionSecondsRemaining = 0;
+    rerender(<AegisVoiceCore contextAvailability="live" nodes={nodes} activeCapability={null} onCapabilityHighlight={vi.fn()} />);
+    expect(screen.queryByRole("progressbar", { name: /voice session time remaining/i })).not.toBeInTheDocument();
+    expect(screen.getByText("Playback active")).toBeInTheDocument();
 
     testState.voice.state = "off";
     testState.voice.sessionActive = false;
@@ -208,5 +225,51 @@ describe("AegisVoiceCore", () => {
     await waitFor(() => expect(testState.sendChatMessage).toHaveBeenCalledWith("Show camera status"));
     expect(screen.getByText(/Camera evidence is unavailable/i)).toBeInTheDocument();
     expect(onCapabilityHighlight).not.toHaveBeenCalled();
+  });
+
+  it("shows compact persisted alert evidence only after the existing drawer is opened", async () => {
+    testState.fetchPersistedEvidence.mockResolvedValueOnce([{
+      event_id: "evt-1",
+      camera_name: "North Gate",
+      risk_level: "HIGH",
+      timestamp: "2026-08-02T12:00:00.000Z",
+      reason: "Confirmed restricted-zone intrusion.",
+      snapshot_available: false,
+      snapshot_url: null,
+    }]);
+    renderCore();
+    await waitFor(() => expect(testState.callbacks).toBeTruthy());
+
+    await act(async () => {
+      testState.callbacks.onTranscript({ speaker: "aegis", text: "A risk alert was recorded.", isFinal: true });
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Open Conversation and Evidence" }).at(-1)!);
+
+    expect(await screen.findByText(/Confirmed restricted-zone intrusion/i)).toBeInTheDocument();
+    expect(screen.getByText("HIGH")).toBeInTheDocument();
+    expect(screen.getByRole("article")).toHaveTextContent("North Gate");
+  });
+
+  it("shows compact active incident context in the existing Evidence drawer", async () => {
+    testState.fetchActiveIncidents.mockResolvedValueOnce([{
+      incident_id: "inc-north-gate-1",
+      camera_id: "north-gate",
+      current_risk_level: "HIGH",
+      evidence_ids: ["evt-1", "evt-2"],
+      summary_reason: "Track remained in the restricted zone.",
+      last_seen_time: "2026-08-02T12:02:00.000Z",
+      status: "active",
+    }]);
+    renderCore();
+    await waitFor(() => expect(testState.callbacks).toBeTruthy());
+    await act(async () => {
+      testState.callbacks.onTranscript({ speaker: "aegis", text: "A risk alert was recorded.", isFinal: true });
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Open Conversation and Evidence" }).at(-1)!);
+
+    expect(await screen.findByText("Active incidents")).toBeInTheDocument();
+    expect(screen.getByText(/Incident.*north-gate/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 linked evidence/i)).toBeInTheDocument();
+    expect(screen.getByText(/Track remained in the restricted zone/i)).toBeInTheDocument();
   });
 });

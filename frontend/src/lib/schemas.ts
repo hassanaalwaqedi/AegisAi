@@ -116,6 +116,8 @@ export const eventSchema = z
   .object({
     id: idSchema.optional(),
     event_id: idSchema.optional(),
+    type: z.string().optional(),
+    event_type: z.string().optional(),
     timestamp: z.union([z.string(), z.number()]).optional(),
     severity: severitySchema.optional(),
     level: severitySchema.optional(),
@@ -151,6 +153,10 @@ export const eventSchema = z
     behavior_labels: z.array(z.string()).optional(),
     frame_number: z.number().optional(),
     snapshot_path: z.string().nullable().optional(),
+    snapshot_status: z.string().optional(),
+    snapshot_url: z.string().nullable().optional(),
+    incident_id: z.string().nullable().optional(),
+    alert_id: z.string().nullable().optional(),
     zone: z.string().optional(),
     camera_id: z.string().optional()
   })
@@ -163,6 +169,72 @@ export const eventsResponseSchema = z
   })
   .passthrough();
 
+export const operationalAlertSchema = z
+  .object({
+    alert_id: z.string(),
+    event_id: z.string(),
+    track_id: z.string().nullable().optional(),
+    camera_id: z.string().nullable().optional(),
+    camera_name: z.string().nullable().optional(),
+    incident_id: z.string().nullable().optional(),
+    evidence_id: z.string().nullable().optional(),
+    evidence_status: z.string().optional(),
+    snapshot_path: z.string().nullable().optional(),
+    bounding_box: z.array(z.number()).nullable().optional(),
+    risk_level: severitySchema,
+    risk_score: z.number().nullable().optional(),
+    message: z.string(),
+    zone: z.string().optional(),
+    factors: z.array(z.union([z.string(), z.record(z.string(), z.unknown())])).optional(),
+    timestamp: z.string().nullable().optional(),
+    acknowledged: z.boolean(),
+    acknowledged_at: z.string().nullable().optional(),
+    acknowledged_by: z.string().nullable().optional(),
+    delivery_status: z.string().optional(),
+    delivery_attempts: z.number().optional()
+  })
+  .passthrough();
+
+export const alertsResponseSchema = z.array(operationalAlertSchema);
+
+export const alertCountResponseSchema = z.object({
+  total: z.number().int().nonnegative(),
+  active: z.number().int().nonnegative(),
+  by_level: numericRecordSchema
+}).passthrough();
+
+export const evidenceRecordSchema = eventSchema.extend({
+  snapshot_available: z.boolean().optional(),
+  snapshot_url: z.string().nullable().optional()
+}).passthrough();
+
+export const persistedEvidenceResponseSchema = z.object({
+  count: z.number(),
+  evidence: z.array(evidenceRecordSchema)
+}).passthrough();
+
+export const incidentSchema = z.object({
+  incident_id: z.string(),
+  camera_id: z.string(),
+  primary_track_id: z.string().nullable().optional(),
+  related_track_ids: z.array(z.string()).optional(),
+  current_risk_level: severitySchema.optional(),
+  max_risk_score: z.number().nullable().optional(),
+  status: z.string(),
+  event_ids: z.array(z.string()).optional(),
+  alert_ids: z.array(z.string()).optional(),
+  evidence_ids: z.array(z.string()).optional(),
+  summary_reason: z.string().nullable().optional(),
+  contributing_factors: z.array(z.union([z.string(), z.record(z.string(), z.unknown())])).optional(),
+  start_time: z.string().nullable().optional(),
+  last_seen_time: z.string().nullable().optional()
+}).passthrough();
+
+export const incidentsResponseSchema = z.object({
+  count: z.number(),
+  incidents: z.array(incidentSchema)
+}).passthrough();
+
 const timeSeriesPointSchema = z
   .object({
     time: z.union([z.string(), z.number()]).optional(),
@@ -172,6 +244,17 @@ const timeSeriesPointSchema = z
     alerts: z.number().optional(),
     density: z.number().optional(),
     value: z.number().optional()
+  })
+  .passthrough();
+
+const analyticsModelSchema = z
+  .object({
+    model_name: z.string().optional(),
+    supported_classes: z.array(z.string()).optional(),
+    weapon_detection_supported: z.boolean().optional(),
+    action_recognition_supported: z.boolean().optional(),
+    pose_estimation_supported: z.boolean().optional(),
+    semantic_verification_supported: z.boolean().optional()
   })
   .passthrough();
 
@@ -220,7 +303,10 @@ export const statisticsResponseSchema = z
       .optional(),
     detections_over_time: z.array(timeSeriesPointSchema).optional(),
     alerts_by_severity: numericRecordSchema.optional(),
-    crowd_density_trend: z.array(timeSeriesPointSchema).optional()
+    crowd_density_trend: z.array(timeSeriesPointSchema).optional(),
+    events_by_type: numericRecordSchema.optional(),
+    latest_detection_events: z.array(eventSchema).optional(),
+    model: analyticsModelSchema.optional()
   })
   .passthrough();
 
@@ -237,7 +323,9 @@ export const semanticQueryResponseSchema = z
     message: z.string(),
     active_prompts: z.number(),
     matches: z.number().optional(),
-    execution_ms: z.number().optional()
+    execution_ms: z.number().optional(),
+    evidence_storage: z.enum(["available", "unavailable"]).optional(),
+    reason: z.string().nullable().optional()
   })
   .passthrough();
 
@@ -270,9 +358,66 @@ export const semanticResultsResponseSchema = z
     evaluated_tracks: z.number().optional(),
     evaluated_events: z.number().optional(),
     execution_ms: z.number().optional(),
-    updated_at: z.string().nullable().optional()
+    updated_at: z.string().nullable().optional(),
+    evidence_storage: z.enum(["available", "unavailable"]).optional(),
+    reason: z.string().nullable().optional()
   })
   .passthrough();
+
+const evidenceRiskLevelSchema = z.enum(["LOW", "CANDIDATE_MEDIUM", "MEDIUM", "HIGH", "CRITICAL"]);
+
+export const evidenceSearchItemSchema = z.object({
+  event_id: z.string(),
+  alert_id: z.string().nullable().optional(),
+  incident_id: z.string().nullable().optional(),
+  camera_id: z.string().nullable().optional(),
+  camera_name: z.string().nullable().optional(),
+  event_type: z.string().nullable().optional(),
+  timestamp: z.string().nullable().optional(),
+  object_class: z.string().nullable().optional(),
+  risk_level: z.string().nullable().optional(),
+  risk_score: z.number().nullable().optional(),
+  track_id: z.union([z.string(), z.number()]).nullable().optional(),
+  zone: z.string().nullable().optional(),
+  zone_name: z.string().nullable().optional(),
+  reason: z.string().nullable().optional(),
+  detection_confidence: z.number().nullable().optional(),
+  detectors: z.array(z.string()).default([]),
+  snapshot_available: z.boolean(),
+  similarity: z.number().optional()
+});
+
+export const evidenceSearchRequestSchema = z.object({
+  query: z.string().max(500).default(""),
+  similar_to: z.string().max(128).nullable().optional(),
+  camera_id: z.string().max(80).nullable().optional(),
+  event_type: z.string().max(50).nullable().optional(),
+  risk_level: evidenceRiskLevelSchema.nullable().optional(),
+  start: z.string().datetime().nullable().optional(),
+  end: z.string().datetime().nullable().optional(),
+  min_confidence: z.number().min(0).max(1).default(0),
+  min_similarity: z.number().min(-1).max(1).default(0.25),
+  sort: z.enum(["relevance", "newest", "oldest", "risk", "confidence"]).default("relevance"),
+  page: z.number().int().min(1).default(1),
+  page_size: z.number().int().min(1).max(50).default(6)
+});
+
+export const evidenceSearchResponseSchema = z.object({
+  results: z.array(evidenceSearchItemSchema), total: z.number().int().nonnegative(), page: z.number().int(),
+  page_size: z.number().int(), sort: z.enum(["relevance", "newest", "oldest", "risk", "confidence"]), has_next: z.boolean(), has_previous: z.boolean(), as_of: z.string(),
+  pending_evidence: z.number().int().nonnegative(), execution_ms: z.number()
+});
+
+export const evidenceSearchStatusSchema = z.object({
+  total_evidence: z.number().int().nonnegative(), indexed_evidence: z.number().int().nonnegative(),
+  pending_evidence: z.number().int().nonnegative(), last_sync: z.string().nullable(),
+  event_types: z.array(z.string()), state: z.enum(["ready", "indexing", "offline"]), model: z.string(),
+  similarity: z.literal("cosine"), representation: z.literal("stored_event_text")
+});
+
+export const evidenceSearchDetailSchema = z.object({
+  evidence: evidenceSearchItemSchema, related: z.array(evidenceSearchItemSchema)
+});
 
 export const cameraSourceTypeSchema = z.enum([
   "LOCAL_DEVICE",
@@ -288,7 +433,10 @@ export const cameraConnectionStatusSchema = z.enum([
   "connecting",
   "reconnecting",
   "error",
-  "stopped"
+  "stopped",
+  "failed",
+  "unverified",
+  "disabled"
 ]);
 
 export const cameraRuntimeStatusSchema = z
@@ -321,6 +469,9 @@ export const cameraSchema = z
     video_id: z.string().nullable().optional(),
     connection_timeout: z.number().optional(),
     max_retries: z.number().optional(),
+    auto_start: z.boolean().optional(),
+    verification_status: z.enum(["verified", "unverified", "failed"]).optional(),
+    last_connection_test: z.record(z.string(), z.unknown()).optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
     created_at: z.string().optional(),
     updated_at: z.string().optional(),
@@ -339,7 +490,16 @@ export const cameraConnectionTestResponseSchema = z
   .object({
     ok: z.boolean(),
     status: cameraConnectionStatusSchema,
-    error_message: z.string().nullable().optional()
+    error_message: z.string().nullable().optional(),
+    error_category: z.string().nullable().optional(),
+    dns_resolved: z.boolean().nullable().optional(),
+    host_reachable: z.boolean().nullable().optional(),
+    time_to_first_frame_ms: z.number().nullable().optional(),
+    width: z.number().nullable().optional(),
+    height: z.number().nullable().optional(),
+    masked_url: z.string().nullable().optional(),
+    snapshot_data_url: z.string().nullable().optional(),
+    test_id: z.string().optional()
   })
   .passthrough();
 
@@ -428,6 +588,7 @@ export const cameraWebSocketMessageSchema = z
     message: z.string().optional(),
     timestamp: z.string().optional(),
     frame: z.string().optional(),
+    detections: z.array(trackSchema).optional(),
     events: z.array(eventSchema).optional()
   })
   .passthrough();

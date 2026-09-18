@@ -52,9 +52,14 @@ export function useIntelligenceContext(): IntelligenceContextState {
 
   useEffect(() => {
     mountedRef.current = true;
-    void refresh();
+    // Defer the initial request so this effect only manages the external
+    // lifecycle. `refresh` owns the asynchronous state transition.
+    const initialRefresh = window.setTimeout(() => {
+      void refresh();
+    }, 0);
 
     return () => {
+      window.clearTimeout(initialRefresh);
       mountedRef.current = false;
     };
   }, [refresh]);

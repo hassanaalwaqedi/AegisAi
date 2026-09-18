@@ -13,11 +13,11 @@ export function SystemHealthCard({ status }: SystemHealthCardProps) {
   const running = system.running;
 
   const rows = [
-    { label: "Version", value: status?.version ?? "Not returned", icon: Cpu },
+    { label: "Version", value: status?.version ?? "Unavailable", icon: Cpu },
     { label: "FPS", value: formatDecimal(system.current_fps ?? system.fps, 1), icon: Gauge },
-    { label: "Frames processed", value: formatNumber(system.frames_processed), icon: Database },
-    { label: "Uptime seconds", value: formatNumber(system.uptime_seconds), icon: Activity },
-    { label: "Semantic layer", value: typeof system.semantic_enabled === "boolean" ? (system.semantic_enabled ? "Enabled" : "Disabled") : "Not returned", icon: RadioTower }
+    { label: "Images reviewed", value: formatNumber(system.frames_processed), icon: Database },
+    { label: "Time running", value: formatNumber(system.uptime_seconds), icon: Activity },
+    { label: "Evidence search", value: typeof system.semantic_enabled === "boolean" ? (system.semantic_enabled ? "Ready" : "Unavailable") : "Unavailable", icon: RadioTower }
   ];
 
   return (
@@ -25,10 +25,10 @@ export function SystemHealthCard({ status }: SystemHealthCardProps) {
       <CardHeader>
         <div>
           <CardTitle>System Health</CardTitle>
-          <p className="mt-1 text-sm text-slate-400">Validated from GET /status</p>
+          <p className="mt-1 text-sm text-slate-400">Current service readiness and activity.</p>
         </div>
         <Badge variant={running ? "success" : running === false ? "warning" : "outline"}>
-          {running === true ? "Running" : running === false ? "Stopped" : "Not returned"}
+          {running === true ? "Ready" : running === false ? "Stopped" : "Unavailable"}
         </Badge>
       </CardHeader>
 

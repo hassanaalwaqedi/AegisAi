@@ -17,12 +17,65 @@ from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException, Query
 
 from aegis.api.state import get_state
+from aegis.intelligence.event_access import load_persisted_event_records, merge_event_records
 
 # Configure module logger
 logger = logging.getLogger(__name__)
 
 # Create router
 router = APIRouter(prefix="/semantic", tags=["semantic"])
+
+# Stored-evidence retrieval is request-scoped. The legacy active live prompt
+# remains available to existing agents and clients without sharing UI queries.
+from aegis.semantic.evidence_search import EvidenceSearchRequest, SearchUnavailable, evidence_search
+
+
+@router.get("/evidence/status")
+def evidence_index_status():
+    try:
+        return evidence_search.status()
+    except SearchUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/evidence/search")
+def search_stored_evidence(request: EvidenceSearchRequest):
+    try:
+        return evidence_search.search(request)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SearchUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/evidence/{event_id}")
+def evidence_search_detail(event_id: str):
+    try:
+        return evidence_search.detail(event_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Evidence detail unavailable: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Evidence is temporarily unavailable.") from exc
+
+
+def _queryable_events(state, *, limit: int = 100) -> tuple[list[dict], str, Optional[str]]:
+    """Return verified live events plus durable evidence and its availability.
+
+    Runtime observations are valid live data, but they are not a substitute for
+    stored evidence.  Carry the durable-store state into the API response so a
+    zero-result search is never mistaken for a complete historical search.
+    """
+    runtime_events = state.get_events(limit=limit)
+    if not isinstance(runtime_events, list):
+        raise TypeError("Runtime event state returned a non-list payload")
+    try:
+        durable_events = load_persisted_event_records(limit=limit)
+    except Exception as exc:
+        logger.warning("Durable semantic evidence unavailable: %s", type(exc).__name__)
+        durable_events = []
+        return merge_event_records(durable_events, runtime_events), "unavailable", "Durable evidence storage is unavailable; only current runtime events were searched."
+    return merge_event_records(durable_events, runtime_events), "available", None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -57,6 +110,8 @@ class SemanticQueryResponse(BaseModel):
     active_prompts: int
     matches: int = 0
     execution_ms: float = 0.0
+    evidence_storage: Literal["available", "unavailable"] = "available"
+    reason: Optional[str] = None
 
 
 class SemanticResultItem(BaseModel):
@@ -88,6 +143,8 @@ class SemanticResultsResponse(BaseModel):
     evaluated_events: int = 0
     execution_ms: float = 0.0
     updated_at: Optional[str] = None
+    evidence_storage: Literal["available", "unavailable"] = "available"
+    reason: Optional[str] = None
 
 
 class PromptItem(BaseModel):
@@ -152,10 +209,11 @@ async def submit_semantic_query(request: SemanticQueryRequest):
         state.active_semantic_query = request.prompt
         state.active_semantic_prompt_id = prompt_id
 
+        events, evidence_storage, reason = _queryable_events(state)
         execution = state.semantic_query_engine.search(
             prompt=request.prompt,
             tracks=state.get_tracks(),
-            events=state.get_events(limit=100),
+            events=events,
             statistics=state.get_statistics(),
         )
         state.semantic_triggers += 1
@@ -172,6 +230,8 @@ async def submit_semantic_query(request: SemanticQueryRequest):
             active_prompts=active_count,
             matches=len(execution.results),
             execution_ms=execution.execution_ms,
+            evidence_storage=evidence_storage,
+            reason=reason,
         )
         
     except Exception as e:
@@ -247,10 +307,11 @@ async def get_semantic_results(limit: int = Query(default=50, le=100)):
     if not prompt:
         return SemanticResultsResponse(total_tracks=0, semantic_matches=0, results=[])
 
+    events, evidence_storage, reason = _queryable_events(state)
     execution = engine.search(
         prompt=prompt,
         tracks=state.get_tracks(),
-        events=state.get_events(limit=100),
+        events=events,
         statistics=state.get_statistics(),
         limit=limit,
     )
@@ -265,6 +326,8 @@ async def get_semantic_results(limit: int = Query(default=50, le=100)):
         evaluated_events=execution.evaluated_events,
         execution_ms=execution.execution_ms,
         updated_at=execution.updated_at,
+        evidence_storage=evidence_storage,
+        reason=reason,
     )
 
 

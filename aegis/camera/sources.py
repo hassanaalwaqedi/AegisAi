@@ -20,8 +20,9 @@ import cv2
 import numpy as np
 
 from aegis.camera.base import BaseCameraSource, OpenCVLoopCameraSource
+from aegis.camera.connection_tests import CameraConnectionTestResult, endpoint_probe
 from aegis.camera.types import CameraConfig, CameraConnectionStatus
-from aegis.camera.utils import validate_stream_url
+from aegis.camera.utils import mask_url, validate_stream_url
 
 logger = logging.getLogger(__name__)
 
@@ -81,12 +82,63 @@ class HTTPCameraSource(OpenCVLoopCameraSource):
             self._capture_source = self._resolve_capture_source()
         return super()._open_capture()
 
+    def test_connection_details(self) -> CameraConnectionTestResult:
+        """Return an actionable result when a YouTube page cannot resolve.
+
+        A YouTube watch URL is deliberately supported as a source page, but
+        OpenCV can only open the temporary media URL produced by yt-dlp. The
+        generic connection handler used to hide that distinction as an
+        unreachable camera even when youtube.com itself was reachable.
+        """
+        try:
+            result = super().test_connection_details()
+            if (
+                self._youtube_page_url
+                and not result.ok
+                and result.error_category in {"authentication_or_stream_rejected", "no_frame"}
+            ):
+                return CameraConnectionTestResult(
+                    ok=False,
+                    status="failed",
+                    error_category="youtube_media_unavailable",
+                    error_message=(
+                        "YouTube metadata was found, but its media stream cannot be opened for live analysis. "
+                        "Use a direct RTSP, HLS, MJPEG, or MP4 stream URL, or upload a video file."
+                    ),
+                    dns_resolved=result.dns_resolved,
+                    host_reachable=result.host_reachable,
+                    masked_url=mask_url(self._youtube_page_url),
+                )
+            return result
+        except Exception as exc:
+            if not self._youtube_page_url:
+                raise
+            probe = endpoint_probe(self._youtube_page_url, self.config.connection_timeout)
+            logger.info(
+                "YouTube stream resolution failed camera_id=%s error=%s",
+                self.config.camera_id,
+                type(exc).__name__,
+            )
+            return CameraConnectionTestResult(
+                ok=False,
+                status="failed",
+                error_category="youtube_resolution_failed",
+                error_message=(
+                    "YouTube was reached, but Aegis could not resolve a playable video stream. "
+                    "Use a public video or live stream and ensure yt-dlp is up to date."
+                ),
+                dns_resolved=probe.get("dns_resolved"),
+                host_reachable=probe.get("host_reachable"),
+                masked_url=mask_url(self._youtube_page_url),
+            )
+
     def _get_frame_interval(self, capture: Optional[cv2.VideoCapture]) -> Optional[float]:
         if not self._youtube_page_url:
             return None
         metadata_fps = self.config.metadata.get("resolved_fps")
         interval = self._fps_interval(float(metadata_fps)) if metadata_fps else None
         return interval or self._capture_fps_interval(capture) or self._fps_interval(30.0)
+
 
 
 class UploadedVideoSource(OpenCVLoopCameraSource):
@@ -139,3 +191,23 @@ class BrowserWebcamSource(BaseCameraSource):
             self._set_status(
                 CameraConnectionStatus.RECONNECTING, "Browser frames stopped"
             )
+
+
+class UnavailableCameraSource(BaseCameraSource):
+    """Visible failed placeholder for a persisted source that cannot restore."""
+
+    def __init__(self, config: CameraConfig, *, reason: str, **kwargs):
+        super().__init__(config, **kwargs)
+        self._set_status(CameraConnectionStatus.ERROR, reason)
+
+    def start(self) -> None:
+        # The underlying source configuration must be repaired before this
+        # source can be replaced by a real factory-created implementation.
+        self._set_status(CameraConnectionStatus.ERROR, self._error_message)
+
+    def stop(self) -> None:
+        self._running = False
+        self._set_status(CameraConnectionStatus.STOPPED, "Stopped")
+
+    def test_connection(self) -> Tuple[bool, Optional[str]]:
+        return False, self._error_message or "Camera source is unavailable"

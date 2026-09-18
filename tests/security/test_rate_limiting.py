@@ -6,6 +6,8 @@ Tests for rate limiting enforcement.
 
 import pytest
 import time
+import hmac
+import hashlib
 from unittest.mock import patch
 
 
@@ -80,3 +82,17 @@ class TestRateLimiting:
             # All should count towards same limit
             # Verification is that no errors occur
             assert True  # Smoke test
+
+    @patch.dict("os.environ", {
+        "AEGIS_API_KEY": "test-key",
+        "AEGIS_RATE_LIMIT": "1",
+        "AEGIS_RATE_LIMIT_WINDOW": "60",
+    })
+    def test_signed_dashboard_proxy_does_not_share_the_loopback_client_bucket(self, client):
+        """Dashboard polling is authenticated server-to-server, not anonymous IP traffic."""
+        signature = hmac.new(
+            b"test-key", b"aegis-dashboard-proxy-v1", hashlib.sha256
+        ).hexdigest()
+        headers = {"X-API-Key": "test-key", "X-Aegis-Internal-Proxy": signature}
+        assert client.get("/status", headers=headers).status_code == 200
+        assert client.get("/status", headers=headers).status_code == 200

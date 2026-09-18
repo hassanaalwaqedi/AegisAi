@@ -39,24 +39,20 @@ def collect_system_context(query: Optional[str] = None, locale: Optional[str] = 
         health = get_system_health()
         context["system_health"] = health
     except Exception:
-        context["system_health"] = {"status": "unavailable"}
+        context["system_health"] = {"availability": "unavailable", "status": "unavailable", "reason": "System health collection failed."}
 
     # Cameras
     try:
         cameras = get_camera_status()
-        context["cameras"] = {
-            "total": cameras.get("total", 0),
-            "online": cameras.get("online", 0),
-            "offline": cameras.get("offline", 0),
-        }
+        context["cameras"] = cameras
     except Exception:
-        context["cameras"] = {"total": 0, "online": 0, "offline": 0}
+        context["cameras"] = {"availability": "unavailable", "reason": "Camera status collection failed."}
 
     # Recent events
     try:
         context["recent_events"] = get_recent_events(limit=10)
     except Exception:
-        context["recent_events"] = []
+        context["recent_events"] = {"availability": "unavailable", "reason": "Event retrieval failed."}
 
     # Active alerts
     try:
@@ -64,20 +60,20 @@ def collect_system_context(query: Optional[str] = None, locale: Optional[str] = 
         context["active_alerts"] = alerts
         context["alert_count"] = len(alerts)
     except Exception:
-        context["active_alerts"] = []
-        context["alert_count"] = 0
+        context["active_alerts"] = {"availability": "unavailable", "reason": "Durable alert retrieval failed."}
+        context["alert_count"] = None
 
     # Active tracks
     try:
         context["tracks"] = get_active_tracks()
     except Exception:
-        context["tracks"] = {}
+        context["tracks"] = {"availability": "unavailable", "reason": "Tracking retrieval failed."}
 
     # Pipeline stats
     try:
         context["pipeline"] = get_detection_statistics()
     except Exception:
-        context["pipeline"] = {}
+        context["pipeline"] = {"availability": "unavailable", "reason": "Pipeline statistics retrieval failed."}
 
     # Official project/creator facts are retrieved from the active database
     # only for the current question.  They are never copied from prompt text or
@@ -119,6 +115,7 @@ def context_to_text(context: Dict[str, Any]) -> str:
     ]
 
     health = context.get("system_health", {})
+    lines.append(f"Availability: {health.get('availability', 'unavailable')}")
     lines.append(f"Status: {health.get('status', 'unknown')}")
     lines.append(f"Database: {health.get('database', 'unknown')}")
     lines.append(f"Redis: {health.get('redis', 'unknown')}")
@@ -128,30 +125,58 @@ def context_to_text(context: Dict[str, Any]) -> str:
     cameras = context.get("cameras", {})
     lines.append("")
     lines.append("=== Cameras ===")
-    lines.append(f"Online: {cameras.get('online', 0)} / {cameras.get('total', 0)}")
-    lines.append(f"Offline: {cameras.get('offline', 0)}")
+    lines.append(f"Availability: {cameras.get('availability', 'unavailable')}")
+    if cameras.get("availability") != "available":
+        lines.append(f"Reason: {cameras.get('reason', 'Camera status unavailable.')}")
+    else:
+        lines.append(f"Online: {cameras.get('online', 'unknown')} / {cameras.get('total', 'unknown')}")
+        lines.append(f"Offline: {cameras.get('offline', 'unknown')}")
 
-    alerts = context.get("active_alerts", [])
+    alerts_value = context.get("active_alerts", [])
+    alerts = alerts_value if isinstance(alerts_value, list) else []
     lines.append("")
-    lines.append(f"=== Active Alerts ({len(alerts)}) ===")
+    if isinstance(alerts_value, list):
+        lines.append(f"=== Active Alerts ({len(alerts)}) ===")
+    else:
+        lines.append("=== Active Alerts: UNAVAILABLE ===")
+        lines.append(f"Reason: {alerts_value.get('reason', 'Durable alert retrieval failed.')}")
     for alert in alerts[:5]:
         cam = alert.get("camera_id", "unknown")
         level = alert.get("risk_level", "unknown")
+        # The durable projection exposes ``message`` while older runtime
+        # alerts use ``explanation``.  Normalize before rendering the prompt.
+        alert = {
+            **alert,
+            "explanation": alert.get("explanation") or alert.get("message") or alert.get("description") or "",
+        }
         lines.append(f"- Camera {cam}: {level} — {alert.get('explanation', '')[:80]}")
 
-    events = context.get("recent_events", [])
+    events_value = context.get("recent_events", [])
+    events = events_value if isinstance(events_value, list) else []
     lines.append("")
-    lines.append(f"=== Recent Events ({len(events)}) ===")
+    if isinstance(events_value, list):
+        lines.append(f"=== Recent Events ({len(events)}) ===")
+    else:
+        lines.append("=== Recent Events: UNAVAILABLE ===")
+        lines.append(f"Reason: {events_value.get('reason', 'Event retrieval failed.')}")
     for event in events[:5]:
         etype = event.get("type", "unknown")
         cam = event.get("camera_id", "unknown")
+        event = {
+            **event,
+            "description": event.get("title") or event.get("description") or event.get("message") or "",
+        }
         lines.append(f"- [{etype}] Camera {cam}: {event.get('title', event.get('description', ''))[:60]}")
 
     tracks = context.get("tracks", {})
     lines.append("")
     lines.append("=== Active Tracking ===")
-    lines.append(f"Cameras Processing: {tracks.get('active_cameras_processing', 0)}")
-    lines.append(f"Recent Tracks: {tracks.get('total_recent_tracks', 0)}")
+    lines.append(f"Availability: {tracks.get('availability', 'unavailable')}")
+    if tracks.get("availability") == "available":
+        lines.append(f"Cameras Processing: {tracks.get('active_cameras_processing', 'unknown')}")
+        lines.append(f"Recent Tracks: {tracks.get('total_recent_tracks', 'unknown')}")
+    else:
+        lines.append(f"Reason: {tracks.get('reason', 'Tracking state unavailable.')}")
 
     knowledge = context.get("official_system_knowledge")
     if knowledge is not None:

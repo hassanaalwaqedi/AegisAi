@@ -16,12 +16,13 @@ Phase 4: Response & Productization Layer
 """
 
 import logging
+import os
 import threading
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, Hashable, List, Optional, Set
 from queue import Queue
 
 from aegis.alerts.alert_types import Alert, AlertLevel, AlertChannel, AlertSummary
@@ -84,7 +85,7 @@ class AlertManager:
         self._config = config or AlertManagerConfig()
         
         # Cooldown tracking: track_id -> last_alert_time
-        self._cooldowns: Dict[int, datetime] = {}
+        self._cooldowns: Dict[Hashable, datetime] = {}
         
         # Alert history
         self._alerts: deque = deque(maxlen=1000)
@@ -131,7 +132,8 @@ class AlertManager:
         risk_score: float,
         message: str,
         zone: str = "",
-        factors: Optional[List[str]] = None
+        factors: Optional[List[str]] = None,
+        cooldown_key: Optional[Hashable] = None,
     ) -> Optional[Alert]:
         """
         Process a risk score and generate alert if warranted.
@@ -158,7 +160,8 @@ class AlertManager:
             return None
         
         # Check cooldown
-        if not self._check_cooldown(track_id):
+        cooldown_identity = cooldown_key if cooldown_key is not None else track_id
+        if not self._check_cooldown(cooldown_identity):
             return None
         
         # Generate alert
@@ -177,7 +180,7 @@ class AlertManager:
         self._dispatch(alert)
         
         # Update cooldown
-        self._update_cooldown(track_id)
+        self._update_cooldown(cooldown_identity)
         
         # Record in history
         with self._lock:
@@ -187,7 +190,7 @@ class AlertManager:
         logger.debug(f"Alert generated: {alert.event_id}")
         return alert
     
-    def _check_cooldown(self, track_id: int) -> bool:
+    def _check_cooldown(self, track_id: Hashable) -> bool:
         """
         Check if track is past cooldown period.
         
@@ -199,17 +202,29 @@ class AlertManager:
         """
         with self._lock:
             if track_id not in self._cooldowns:
-                return True
+                return not self._has_persisted_cooldown(str(track_id))
             
             last_alert = self._cooldowns[track_id]
             cooldown = timedelta(seconds=self._config.cooldown_seconds)
             
             return datetime.now() - last_alert > cooldown
     
-    def _update_cooldown(self, track_id: int) -> None:
+    def _update_cooldown(self, track_id: Hashable) -> None:
         """Update cooldown timestamp for a track."""
         with self._lock:
             self._cooldowns[track_id] = datetime.now()
+
+    def clear_cooldowns(self, prefix: Optional[str] = None) -> None:
+        """Clear all cooldowns, or only string identities for one camera."""
+        with self._lock:
+            if prefix is None:
+                self._cooldowns.clear()
+                return
+            self._cooldowns = {
+                key: value
+                for key, value in self._cooldowns.items()
+                if not str(key).startswith(prefix)
+            }
     
     def _dispatch(self, alert: Alert) -> None:
         """
@@ -226,6 +241,8 @@ class AlertManager:
         
         if AlertChannel.API in self._config.channels:
             self._dispatch_api(alert)
+        elif alert.delivery_status == "created":
+            alert.delivery_status = "not_configured"
     
     def _dispatch_console(self, alert: Alert) -> None:
         """Print alert to console."""
@@ -242,11 +259,18 @@ class AlertManager:
     def _dispatch_api(self, alert: Alert) -> None:
         """Add alert to API queue."""
         try:
-            # Non-blocking put, drop if queue is full
             self._api_queue.put_nowait(alert)
-        except Exception:
-            # Queue full, silently drop oldest if needed
-            pass
+            alert.delivery_status = "queued"
+            alert.delivery_attempts += 1
+            alert.delivered_at = datetime.now()
+            alert.last_delivery_error = None
+        except Exception as exc:
+            # The durable record captures the delivery failure; losing an alert
+            # silently is not acceptable for an operator workflow.
+            alert.delivery_status = "failed"
+            alert.delivery_attempts += 1
+            alert.last_delivery_error = f"API queue unavailable: {type(exc).__name__}"
+            logger.error("Alert API queue dispatch failed event_id=%s: %s", alert.event_id, exc)
     
     def _update_stats(self, alert: Alert) -> None:
         """Update statistics with new alert."""
@@ -301,6 +325,112 @@ class AlertManager:
             except Exception:
                 break
         return alerts
+
+    def persist_alert(
+        self,
+        alert: Alert,
+        *,
+        event_id: str,
+        cooldown_key: Optional[Hashable] = None,
+    ) -> bool:
+        """Persist finalized alert state after its evidence event is durable.
+
+        Risk generation remains non-blocking for camera processing, but an
+        alert is not considered durable until it has an evidence event ID. The
+        record retains acknowledgement, queue delivery state, and cooldown
+        metadata across process restarts.
+        """
+        try:
+            from aegis.database.connection import get_db_session
+            from aegis.database.repositories import EventRepository, OperationalAlertRepository
+
+            cooldown_identity = str(cooldown_key if cooldown_key is not None else alert.track_id)
+            cooldown_expires_at = alert.timestamp + timedelta(seconds=self._config.cooldown_seconds)
+            with get_db_session() as session:
+                evidence_event = EventRepository(session).get_by_event_id(str(event_id))
+                if evidence_event is None:
+                    raise ValueError(f"Cannot persist alert without evidence event {event_id}")
+                record = OperationalAlertRepository(session).create_or_get(
+                    alert_id=alert.event_id,
+                    event_id=str(event_id),
+                    event_record_id=evidence_event.id,
+                    track_id=str(alert.track_id),
+                    level=alert.level.value,
+                    risk_score=float(alert.risk_score),
+                    message=alert.message,
+                    zone=alert.zone or None,
+                    factors=list(alert.factors),
+                    cooldown_key=cooldown_identity,
+                    cooldown_expires_at=cooldown_expires_at,
+                    delivery_status=alert.delivery_status,
+                    delivery_attempts=alert.delivery_attempts,
+                    delivered_at=alert.delivered_at,
+                    last_delivery_error=alert.last_delivery_error,
+                )
+                # Preserve the public alert identity on the existing durable
+                # event so evidence, incident, and alert APIs agree.
+                evidence_event.alert_id = alert.event_id
+                self._cooldowns[cooldown_key if cooldown_key is not None else alert.track_id] = alert.timestamp
+                logger.info("Persisted alert alert_id=%s event_id=%s record_id=%s", alert.event_id, event_id, record.id)
+            return True
+        except Exception as exc:
+            logger.error("Alert persistence failed alert_id=%s: %s", alert.event_id, exc)
+            return False
+
+    def get_persisted_alerts(
+        self,
+        *,
+        limit: int = 50,
+        level: Optional[str] = None,
+        active_only: bool = False,
+    ) -> List[dict]:
+        """Return durable alerts; never substitute the process-local history."""
+        from aegis.database.connection import get_db_session
+        from aegis.database.repositories import OperationalAlertRepository
+
+        with get_db_session() as session:
+            repository = OperationalAlertRepository(session)
+            records = repository.get_active(limit) if active_only else repository.get_recent(limit, level)
+            if active_only and level:
+                records = [record for record in records if record.level == level.upper()]
+            return [record.to_dict() for record in records]
+
+    def acknowledge_persisted_alert(self, alert_id: str, acknowledged_by: str = "api-key-operator") -> bool:
+        """Acknowledge the durable record and mirror the current in-memory copy."""
+        from aegis.database.connection import get_db_session
+        from aegis.database.repositories import OperationalAlertRepository
+
+        with get_db_session() as session:
+            record = OperationalAlertRepository(session).acknowledge(alert_id, acknowledged_by)
+            if record is None:
+                return False
+        with self._lock:
+            for alert in self._alerts:
+                if alert.event_id == alert_id:
+                    alert.acknowledged = True
+                    break
+        return True
+
+    def get_persisted_summary(self) -> dict:
+        from aegis.database.connection import get_db_session
+        from aegis.database.repositories import OperationalAlertRepository
+
+        with get_db_session() as session:
+            return OperationalAlertRepository(session).summary()
+
+    def _has_persisted_cooldown(self, cooldown_key: str) -> bool:
+        """Consult durable cooldown metadata on a cold process when configured."""
+        if not cooldown_key or not os.getenv("DATABASE_URL"):
+            return False
+        try:
+            from aegis.database.connection import get_db_session
+            from aegis.database.repositories import OperationalAlertRepository
+
+            with get_db_session() as session:
+                return OperationalAlertRepository(session).active_cooldown(cooldown_key) is not None
+        except Exception as exc:
+            logger.warning("Could not verify persisted alert cooldown: %s", type(exc).__name__)
+            return False
     
     def cleanup_cooldowns(self) -> int:
         """

@@ -49,6 +49,11 @@ from aegis.risk.person_weapon_association import (
     PersonWeaponAssociationEngine,
     WeaponAssociation,
 )
+from aegis.risk.weapon_aggression import (
+    ThreatContext,
+    WeaponAggressionConfig,
+    WeaponAggressionRiskLayer,
+)
 
 __all__ = [
     # Types
@@ -78,4 +83,7 @@ __all__ = [
     # Phase 2: evidence association
     "PersonWeaponAssociationEngine",
     "WeaponAssociation",
+    "ThreatContext",
+    "WeaponAggressionConfig",
+    "WeaponAggressionRiskLayer",
 ]

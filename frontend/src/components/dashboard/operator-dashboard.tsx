@@ -1,282 +1,399 @@
 "use client";
 
-import type { ReactNode } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
+import { useMemo } from "react";
+import { Link } from "@/i18n/routing";
+import { useTranslations } from "next-intl";
 import {
   AlertTriangle,
+  BellRing,
   Camera,
   CheckCircle2,
-  ChevronRight,
   CircleAlert,
   CircleOff,
-  Clock3,
-  Expand,
-  Eye,
-  Info,
-  LoaderCircle,
+  ClipboardCheck,
+  FileSearch,
+  RadioTower,
   ShieldAlert,
   ShieldCheck,
-  Video,
+  Sparkles,
   WifiOff,
 } from "lucide-react";
 
-import { appConfig } from "@/lib/config";
-import { cn, formatTime } from "@/lib/utils";
-import type { Camera as CameraType, RiskEvent, StatusResponse } from "@/types";
+import { cn } from "@/lib/utils";
+import { formatTimestamp, getStatusSystem } from "@/lib/data-format";
+import type { Camera as CameraType, EvidenceRecord, Incident, OperationalAlert, RiskEvent, StatusResponse } from "@/types";
 
 type CameraCondition = "live" | "delayed" | "offline" | "unavailable";
-type ReviewKind = "alert" | "offline" | "delayed";
+type AttentionKind = "alert" | "camera" | "incident" | "detection" | "evidence";
+type DashboardSource = "status" | "cameras" | "alerts" | "events" | "incidents" | "evidence";
 
-type ReviewItem = {
-  camera: CameraType;
-  event?: RiskEvent;
-  kind: ReviewKind;
+type DashboardAvailability = Record<DashboardSource, boolean>;
+
+type AttentionItem = {
+  id: string;
+  kind: AttentionKind;
   priority: number;
-  summary: string;
-  timestamp?: string | number;
+  title: string;
+  detail: string;
+  location?: string;
+  timestamp?: string | number | null;
+  href: string;
 };
 
-const STATUS_ACTION_CLASS = "inline-flex min-h-10 items-center gap-1 rounded-md border border-white/10 bg-command-950/40 px-3 text-sm font-semibold text-slate-100 transition hover:border-signal-cyan/60 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan";
+type ActivityItem = {
+  id: string;
+  title: string;
+  detail?: string;
+  camera?: string;
+  timestamp?: string | number | null;
+};
 
 type OperatorDashboardProps = {
   cameras: CameraType[];
   events: RiskEvent[];
+  alerts?: OperationalAlert[];
+  incidents?: Incident[];
+  evidence?: EvidenceRecord[];
   status?: StatusResponse;
+  availability?: Partial<DashboardAvailability>;
   isLoading: boolean;
   isUnavailable: boolean;
   onRetry: () => void;
 };
 
-function cameraName(camera: CameraType) {
-  if (camera.name?.trim()) return camera.name.trim();
-  const numericSuffix = camera.camera_id.match(/(\d+)$/)?.[1];
-  return numericSuffix ? `Camera ${numericSuffix}` : "Registered camera";
+const CLOSED_INCIDENT_STATES = new Set(["resolved", "closed", "false_positive"]);
+
+function cameraName(camera?: CameraType, cameraId?: string | null) {
+  if (camera?.name?.trim()) return camera.name.trim();
+  const reference = camera?.camera_id ?? cameraId;
+  if (!reference) return "Camera unavailable";
+  const numericSuffix = reference.match(/(\d+)$/)?.[1];
+  return numericSuffix ? `Camera ${numericSuffix}` : "Camera";
 }
 
 function cameraCondition(camera: CameraType): CameraCondition {
   const runtime = camera.runtime;
-  if (["offline", "error", "stopped"].includes(runtime.status)) return "offline";
-  if (runtime.status === "reconnecting") return "delayed";
+  if (["offline", "error", "stopped", "failed"].includes(runtime.status)) return "offline";
+  if (["connecting", "reconnecting"].includes(runtime.status)) return "delayed";
   if (runtime.status === "online" && runtime.running) return "live";
   return "unavailable";
 }
 
-function conditionLabel(condition: CameraCondition) {
-  if (condition === "live") return "Live";
-  if (condition === "delayed") return "Delayed";
-  if (condition === "offline") return "Offline";
-  return "Unavailable";
+function priorityFromRisk(level?: string | null) {
+  const value = String(level ?? "").toUpperCase();
+  if (value === "CRITICAL") return 4;
+  if (value === "HIGH") return 3;
+  if (["MEDIUM", "CANDIDATE_MEDIUM", "WARNING"].includes(value)) return 2;
+  return 1;
 }
 
 function priorityFromEvent(event: RiskEvent) {
-  const level = String(event.risk_level ?? event.severity ?? event.level ?? "").toUpperCase();
-  if (level === "CRITICAL") return 3;
-  if (level === "HIGH") return 2;
-  if (["MEDIUM", "CANDIDATE_MEDIUM", "WARNING"].includes(level)) return 1;
-  return 0;
+  return priorityFromRisk(event.risk_level ?? event.severity ?? event.level);
 }
 
 function eventTime(event?: RiskEvent) {
-  if (!event?.timestamp) return 0;
-  if (typeof event.timestamp === "number") return event.timestamp * 1_000;
-  return Date.parse(event.timestamp) || 0;
+  return dateValue(event?.timestamp);
 }
 
-function eventSummary(event: RiskEvent) {
-  const object = String(event.object_class ?? event.object_type ?? event.class_name ?? "").trim().toLowerCase();
-  const friendlyObject = ["person", "vehicle", "car", "bus", "truck", "motorcycle", "bicycle"].includes(object)
-    ? object.replace(/^./, (letter) => letter.toUpperCase())
-    : "Activity";
-  return priorityFromEvent(event) >= 2 ? "High-priority activity needs review" : `${friendlyObject} activity needs review`;
+function dateValue(value?: string | number | null) {
+  if (typeof value === "number") return value * 1_000;
+  if (typeof value === "string") return Date.parse(value) || 0;
+  return 0;
 }
 
-function buildReviewItems(cameras: CameraType[], events: RiskEvent[]) {
-  const byId = new Map(cameras.map((camera) => [camera.camera_id, camera]));
-  const items = new Map<string, ReviewItem>();
-  const add = (item: ReviewItem) => {
-    const existing = items.get(item.camera.camera_id);
-    if (!existing || item.priority > existing.priority || (item.priority === existing.priority && eventTime(item.event) > eventTime(existing.event))) {
-      items.set(item.camera.camera_id, item);
-    }
-  };
-
-  for (const event of events) {
-    const priority = priorityFromEvent(event);
-    const camera = event.camera_id ? byId.get(event.camera_id) : undefined;
-    if (!camera || priority === 0) continue;
-    add({ camera, event, kind: "alert", priority, summary: eventSummary(event), timestamp: event.timestamp });
-  }
-
-  for (const camera of cameras) {
-    const condition = cameraCondition(camera);
-    if (condition === "offline") add({ camera, kind: "offline", priority: 2, summary: "Camera offline", timestamp: camera.runtime.last_frame_time ?? undefined });
-    if (condition === "delayed") add({ camera, kind: "delayed", priority: 1, summary: "Live image is delayed", timestamp: camera.runtime.last_frame_time ?? undefined });
-  }
-
-  return Array.from(items.values()).sort((left, right) => right.priority - left.priority || eventTime(right.event) - eventTime(left.event));
+function focusHref(cameraId?: string | null) {
+  return cameraId ? `/cameras?camera=${encodeURIComponent(cameraId)}&view=focus` : "/cameras";
 }
 
-function cameraCounts(cameras: CameraType[], reviewItems: ReviewItem[]) {
-  const attentionIds = new Set(reviewItems.map((item) => item.camera.camera_id));
+function cameraCounts(cameras: CameraType[]) {
   const conditions = cameras.map(cameraCondition);
   return {
     total: cameras.length,
     live: conditions.filter((condition) => condition === "live").length,
-    attention: cameras.filter((camera) => attentionIds.has(camera.camera_id) && cameraCondition(camera) !== "offline").length,
+    attention: conditions.filter((condition) => condition === "delayed" || condition === "unavailable").length,
     offline: conditions.filter((condition) => condition === "offline").length,
   };
 }
 
-function focusCamera(cameras: CameraType[], reviewItems: ReviewItem[]) {
-  return reviewItems[0]?.camera ?? cameras.find((camera) => cameraCondition(camera) === "live") ?? cameras[0];
+function incidentIsOpen(incident: Incident) {
+  return !CLOSED_INCIDENT_STATES.has(incident.status.trim().toLowerCase());
 }
 
-function focusHref(camera: CameraType) {
-  return `/cameras?camera=${encodeURIComponent(camera.camera_id)}&view=focus`;
+function shortText(value: string, maxLength = 116) {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 1).trimEnd()}…` : value;
 }
 
-export function OperatorDashboard({ cameras, events, status, isLoading, isUnavailable, onRetry }: OperatorDashboardProps) {
-  const reviewItems = useMemo(() => buildReviewItems(cameras, events), [cameras, events]);
-  const counts = useMemo(() => cameraCounts(cameras, reviewItems), [cameras, reviewItems]);
-  const selectedCamera = useMemo(() => focusCamera(cameras, reviewItems), [cameras, reviewItems]);
-  const systemDegraded = status?.system?.running === false;
+function buildAttentionItems({ cameras, alerts, events, incidents, status, availability }: {
+  cameras: CameraType[];
+  alerts?: OperationalAlert[];
+  events: RiskEvent[];
+  incidents?: Incident[];
+  status?: StatusResponse;
+  availability: DashboardAvailability;
+}) {
+  const camerasById = new Map(cameras.map((camera) => [camera.camera_id, camera]));
+  const items: AttentionItem[] = [];
+
+  if (availability.alerts && alerts) {
+    for (const alert of alerts) {
+      if (alert.acknowledged) continue;
+      const priority = priorityFromRisk(alert.risk_level);
+      if (priority < 2) continue;
+      const camera = alert.camera_id ? camerasById.get(alert.camera_id) : undefined;
+      const location = [cameraName(camera, alert.camera_name ?? alert.camera_id), alert.zone].filter(Boolean).join(" · ");
+      items.push({
+        id: `alert:${alert.alert_id}`,
+        kind: "alert",
+        priority,
+        title: priority === 4 ? "Critical alert" : priority === 3 ? "High-priority alert" : "Alert needs review",
+        detail: shortText(alert.message || "Security activity requires review."),
+        location: location || undefined,
+        timestamp: alert.timestamp,
+        href: "/events",
+      });
+    }
+  } else if (availability.events) {
+    for (const event of events) {
+      const priority = priorityFromEvent(event);
+      if (priority < 2) continue;
+      const camera = event.camera_id ? camerasById.get(event.camera_id) : undefined;
+      items.push({
+        id: `event:${event.event_id ?? event.id ?? `${event.timestamp}-${event.camera_id}`}`,
+        kind: "alert",
+        priority,
+        title: priority === 4 ? "Critical activity" : priority === 3 ? "High-priority activity" : "Activity needs review",
+        detail: shortText(event.explanation ?? event.description ?? event.reason ?? "Security activity requires review."),
+        location: cameraName(camera, event.camera_id),
+        timestamp: event.timestamp,
+        href: "/events",
+      });
+    }
+  }
+
+  if (availability.incidents && incidents) {
+    for (const incident of incidents.filter(incidentIsOpen)) {
+      const priority = priorityFromRisk(incident.current_risk_level);
+      const camera = camerasById.get(incident.camera_id);
+      items.push({
+        id: `incident:${incident.incident_id}`,
+        kind: "incident",
+        priority: Math.max(2, priority),
+        title: "Open incident",
+        detail: shortText(incident.summary_reason ?? "This incident requires operator review."),
+        location: cameraName(camera, incident.camera_id),
+        timestamp: incident.last_seen_time ?? incident.start_time,
+        href: "/events",
+      });
+    }
+  }
+
+  if (availability.cameras) {
+    for (const camera of cameras) {
+      const condition = cameraCondition(camera);
+      if (condition !== "offline" && condition !== "delayed") continue;
+      items.push({
+        id: `camera:${camera.camera_id}:${condition}`,
+        kind: "camera",
+        priority: condition === "offline" ? 3 : 2,
+        title: condition === "offline" ? "Camera offline" : "Live image delayed",
+        detail: condition === "offline" ? "This camera is not currently sending live images." : "This camera is reconnecting or its latest image is delayed.",
+        location: cameraName(camera),
+        timestamp: camera.runtime.last_frame_time,
+        href: focusHref(camera.camera_id),
+      });
+    }
+  }
+
+  if (availability.status && status?.system?.running === false) {
+    items.push({
+      id: "detection-service",
+      kind: "detection",
+      priority: 3,
+      title: "Detection service needs attention",
+      detail: "Current activity cannot be assessed until the service is ready.",
+      href: "/intelligence",
+    });
+  }
+
+  if (!availability.evidence) {
+    items.push({
+      id: "evidence-unavailable",
+      kind: "evidence",
+      priority: 2,
+      title: "Evidence is unavailable",
+      detail: "Saved evidence cannot be loaded right now.",
+      href: "/semantic",
+    });
+  }
+
+  return items.sort((left, right) => right.priority - left.priority || dateValue(right.timestamp) - dateValue(left.timestamp));
+}
+
+function buildLatestActivity(alerts: OperationalAlert[] | undefined, events: RiskEvent[], alertsAvailable: boolean) {
+  if (alertsAvailable && alerts) {
+    return alerts
+      .filter((alert) => priorityFromRisk(alert.risk_level) >= 3)
+      .sort((left, right) => dateValue(right.timestamp) - dateValue(left.timestamp))
+      .slice(0, 5)
+      .map((alert): ActivityItem => ({
+        id: `alert:${alert.alert_id}`,
+        title: priorityFromRisk(alert.risk_level) === 4 ? "Critical alert" : "High-priority alert",
+        detail: shortText(alert.message || "Security activity requires review."),
+        camera: alert.camera_name ?? alert.camera_id ?? undefined,
+        timestamp: alert.timestamp,
+      }));
+  }
+
+  return events
+    .filter((event) => priorityFromEvent(event) >= 3)
+    .sort((left, right) => eventTime(right) - eventTime(left))
+    .slice(0, 5)
+    .map((event): ActivityItem => ({
+      id: `event:${event.event_id ?? event.id ?? `${event.timestamp}-${event.camera_id}`}`,
+      title: priorityFromEvent(event) === 4 ? "Critical activity" : "High-priority activity",
+      detail: shortText(event.explanation ?? event.description ?? event.reason ?? "Security activity requires review."),
+      camera: event.camera_id,
+      timestamp: event.timestamp,
+    }));
+}
+
+function dashboardStatus({ availability, cameras, attentionItems }: { availability: DashboardAvailability; cameras: CameraType[]; attentionItems: AttentionItem[] }) {
+  if (!Object.values(availability).every(Boolean)) return { labelKey: "degraded", tone: "degraded" as const };
+  if (attentionItems.some((item) => item.priority === 4)) return { labelKey: "critical", tone: "critical" as const };
+  if (attentionItems.length > 0 || cameras.length === 0) return { labelKey: "needsReview", tone: "attention" as const };
+  return { labelKey: "stable", tone: "stable" as const };
+}
+
+export function OperatorDashboard({ cameras, events, alerts, incidents, evidence, status, availability, isLoading, isUnavailable, onRetry }: OperatorDashboardProps) {
+  const dataAvailability = useMemo<DashboardAvailability>(() => ({
+    status: availability?.status ?? !isUnavailable,
+    cameras: availability?.cameras ?? !isUnavailable,
+    alerts: availability?.alerts ?? !isUnavailable,
+    events: availability?.events ?? !isUnavailable,
+    incidents: availability?.incidents ?? !isUnavailable,
+    evidence: availability?.evidence ?? !isUnavailable,
+  }), [availability, isUnavailable]);
+  const counts = useMemo(() => cameraCounts(cameras), [cameras]);
+  const activeAlerts = useMemo(() => alerts?.filter((alert) => !alert.acknowledged), [alerts]);
+  const criticalAlerts = useMemo(() => activeAlerts?.filter((alert) => priorityFromRisk(alert.risk_level) === 4), [activeAlerts]);
+  const openIncidents = useMemo(() => incidents?.filter(incidentIsOpen), [incidents]);
+  const attentionItems = useMemo(() => buildAttentionItems({ cameras, alerts, events, incidents, status, availability: dataAvailability }), [alerts, cameras, dataAvailability, events, incidents, status]);
+  const latestActivity = useMemo(() => buildLatestActivity(alerts, events, dataAvailability.alerts), [alerts, dataAvailability.alerts, events]);
+  const currentStatus = dashboardStatus({ availability: dataAvailability, cameras, attentionItems });
+
+  if (isLoading) return <DashboardLoading />;
 
   return (
-    <section className="mx-auto w-full max-w-[1800px] px-4 py-6 sm:px-6 lg:px-8">
-      <header className="mb-5 flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p className="text-sm font-medium text-slate-400">Security overview</p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight text-white sm:text-4xl">Operations dashboard</h1>
-        </div>
-        <Link href="/cameras" className="inline-flex min-h-10 items-center gap-2 rounded-md border border-white/10 px-3 text-sm font-semibold text-slate-200 transition hover:border-signal-cyan/50 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan">
-          <Camera className="h-4 w-4" aria-hidden />Open camera wall
-        </Link>
-      </header>
+    <section className="mx-auto w-full max-w-[1600px] px-4 py-6 sm:px-6 lg:px-8" aria-labelledby="operational-overview-title">
+      <DashboardHeader status={currentStatus} />
+      <MetricGrid
+        activeAlerts={dataAvailability.alerts ? activeAlerts?.length : undefined}
+        criticalAlerts={dataAvailability.alerts ? criticalAlerts?.length : undefined}
+        openIncidents={dataAvailability.incidents ? openIncidents?.length : undefined}
+        camerasOnline={dataAvailability.cameras ? counts.live : undefined}
+        camerasOffline={dataAvailability.cameras ? counts.offline : undefined}
+        evidenceAvailable={dataAvailability.evidence ? evidence?.length : undefined}
+      />
 
-      {isLoading ? <DashboardLoading /> : null}
-      {!isLoading ? (
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(330px,0.7fr)] xl:items-start">
-          <OperationalStatus
-            cameras={cameras}
-            reviewItems={reviewItems}
-            liveCount={counts.live}
-            systemDegraded={systemDegraded}
-            unavailable={isUnavailable}
-            onRetry={onRetry}
-          />
-          <NeedsReview items={reviewItems} unavailable={isUnavailable} />
-          <LiveCameraFocus camera={selectedCamera} unavailable={isUnavailable} />
-          <CameraOverview cameras={cameras} counts={counts} reviewItems={reviewItems} unavailable={isUnavailable} />
-          <RecentActivity items={reviewItems} unavailable={isUnavailable} />
-          <DashboardDiagnostics status={status} cameras={cameras} events={events} unavailable={isUnavailable} />
-        </div>
-      ) : null}
+      <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(340px,0.82fr)]">
+        <NeedsAttention items={attentionItems} unavailable={isUnavailable} onRetry={onRetry} />
+        <QuickActions />
+      </div>
+
+      <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
+        <LatestCriticalActivity items={latestActivity} alertsAvailable={dataAvailability.alerts} eventsAvailable={dataAvailability.events} />
+        <TodaySummary alerts={alerts} cameras={cameras} alertsAvailable={dataAvailability.alerts} camerasAvailable={dataAvailability.cameras} />
+      </div>
+
+      <SystemReadiness availability={dataAvailability} status={status} />
     </section>
   );
 }
 
-function OperationalStatus({ cameras, reviewItems, liveCount, systemDegraded, unavailable, onRetry }: { cameras: CameraType[]; reviewItems: ReviewItem[]; liveCount: number; systemDegraded: boolean; unavailable: boolean; onRetry: () => void }) {
-  let title = "All clear";
-  let detail = "No urgent activity needs review.";
-  let tone: "good" | "attention" | "high" | "unavailable" = "good";
-  let action: ReactNode = <Link href="/cameras" className={STATUS_ACTION_CLASS}>Open camera wall<ChevronRight className="h-4 w-4" aria-hidden /></Link>;
-
-  if (unavailable) {
-    title = "System unavailable";
-    detail = "Live status is temporarily unavailable.";
-    tone = "unavailable";
-    action = <button type="button" onClick={onRetry} className={STATUS_ACTION_CLASS}>Retry<ChevronRight className="h-4 w-4" aria-hidden /></button>;
-  } else if (cameras.length === 0) {
-    title = "No cameras connected";
-    detail = "Add a camera to begin monitoring.";
-    tone = "attention";
-    action = <Link href="/cameras" className={STATUS_ACTION_CLASS}>Add camera<ChevronRight className="h-4 w-4" aria-hidden /></Link>;
-  } else if (systemDegraded) {
-    title = "Needs attention";
-    detail = "Live service needs review.";
-    tone = "attention";
-  } else if (reviewItems[0]?.priority === 3) {
-    title = "High priority";
-    detail = "Immediate review recommended.";
-    tone = "high";
-    action = <Link href={focusHref(reviewItems[0].camera)} className={STATUS_ACTION_CLASS}>Review alerts<ChevronRight className="h-4 w-4" aria-hidden /></Link>;
-  } else if (reviewItems.length > 0) {
-    title = "Needs attention";
-    detail = `${reviewItems.length} ${reviewItems.length === 1 ? "item needs" : "items need"} review.`;
-    tone = "attention";
-    action = <Link href={focusHref(reviewItems[0].camera)} className={STATUS_ACTION_CLASS}>Review alerts<ChevronRight className="h-4 w-4" aria-hidden /></Link>;
-  } else if (liveCount === 0) {
-    title = "Needs attention";
-    detail = "No live camera is available.";
-    tone = "attention";
-  }
-
-  const Icon = tone === "good" ? ShieldCheck : tone === "high" ? ShieldAlert : tone === "unavailable" ? WifiOff : CircleAlert;
-  return <section className={cn("glass-panel rounded-xl p-5 sm:p-6 xl:col-start-1 xl:row-start-1", tone === "good" ? "border-emerald-300/25" : tone === "high" ? "border-rose-300/35" : tone === "attention" ? "border-amber-300/30" : "border-rose-300/30")} aria-labelledby="operational-status-title"><div className="flex flex-wrap items-start justify-between gap-4"><div className="flex items-start gap-4"><span className={cn("flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border", tone === "good" ? "border-emerald-300/30 bg-emerald-400/10 text-emerald-200" : tone === "high" ? "border-rose-300/30 bg-rose-400/10 text-rose-100" : tone === "attention" ? "border-amber-300/30 bg-amber-300/10 text-amber-100" : "border-rose-300/30 bg-rose-400/10 text-rose-100")}><Icon className="h-6 w-6" aria-hidden /></span><div><p className="text-sm font-medium text-slate-400">Current status</p><h2 id="operational-status-title" className="mt-1 text-2xl font-semibold text-white">{title}</h2><p className="mt-1 text-sm text-slate-300">{detail}</p></div></div>{action}</div></section>;
+function DashboardHeader({ status }: { status: { labelKey: string; tone: "stable" | "attention" | "critical" | "degraded" } }) {
+  const t = useTranslations("dashboard.header");
+  const tStatus = useTranslations("dashboard.status");
+  const Icon = status.tone === "stable" ? ShieldCheck : status.tone === "critical" ? ShieldAlert : status.tone === "degraded" ? WifiOff : CircleAlert;
+  return <header className="flex flex-wrap items-end justify-between gap-4"><div><h1 id="operational-overview-title" className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">{t("title")}</h1><p className="mt-2 text-sm text-slate-400">{t("subtitle")}</p></div><span className={cn("inline-flex min-h-10 items-center gap-2 rounded-full border px-3.5 text-sm font-semibold", status.tone === "stable" ? "border-emerald-300/30 bg-emerald-400/10 text-emerald-100" : status.tone === "critical" ? "border-eose-300/35 bg-rose-400/10 text-rose-100" : status.tone === "attention" ? "border-amber-300/35 bg-amber-300/10 text-amber-100" : "border-slate-300/20 bg-white/[0.05] text-slate-200")}><Icon className="h-4 w-4" aria-hidden />{tStatus(status.labelKey)}</span></header>;
 }
 
-function LiveCameraFocus({ camera, unavailable }: { camera?: CameraType; unavailable: boolean }) {
-  const panelRef = useRef<HTMLElement>(null);
-  if (unavailable) return <section className="glass-panel rounded-xl p-6 xl:col-start-1 xl:row-start-2" aria-labelledby="live-view-title"><p className="text-sm font-medium text-slate-400">Live view</p><h2 id="live-view-title" className="mt-1 text-xl font-semibold text-white">Live data is temporarily unavailable.</h2><button type="button" className="mt-5 inline-flex min-h-10 items-center gap-2 rounded-md border border-white/10 px-3 text-sm font-semibold text-slate-200" disabled>Preview unavailable</button></section>;
-  if (!camera) return <section className="glass-panel rounded-xl p-6 xl:col-start-1 xl:row-start-2" aria-labelledby="live-view-title"><p className="text-sm font-medium text-slate-400">Live view</p><h2 id="live-view-title" className="mt-1 text-xl font-semibold text-white">No live camera available.</h2><p className="mt-2 text-sm text-slate-400">Open the camera wall to register or review sources.</p><Link href="/cameras" className="mt-5 inline-flex min-h-10 items-center gap-2 rounded-md bg-signal-cyan px-3 text-sm font-semibold text-command-950">Open camera wall<ChevronRight className="h-4 w-4" aria-hidden /></Link></section>;
-
-  const condition = cameraCondition(camera);
-  const canPreview = condition === "live";
-  const unavailableCopy = condition === "offline" ? "Camera offline — check connection." : condition === "delayed" ? "Live image is delayed." : "Live data is temporarily unavailable.";
-  return <section ref={panelRef} className="glass-panel overflow-hidden rounded-xl xl:col-start-1 xl:row-start-2" aria-labelledby="live-view-title"><div className="flex flex-wrap items-start justify-between gap-4 p-5"><div><p className="text-sm font-medium text-slate-400">Live view</p><div className="mt-1 flex flex-wrap items-center gap-2"><h2 id="live-view-title" className="text-xl font-semibold text-white">{cameraName(camera)}</h2><CameraStatus condition={condition} /></div><p className="mt-1 text-sm text-slate-400">{camera.runtime.last_frame_time ? `Updated ${formatTime(camera.runtime.last_frame_time)}` : "Update time unavailable"}</p></div><button type="button" onClick={() => void panelRef.current?.requestFullscreen?.()} className="inline-flex min-h-9 items-center gap-2 rounded-md border border-white/10 px-3 text-sm font-medium text-slate-200 transition hover:border-signal-cyan/50 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan"><Expand className="h-4 w-4" aria-hidden />Fullscreen</button></div><div className="relative aspect-video bg-black">{canPreview ? <DashboardSnapshot camera={camera} className="h-full w-full object-cover" /> : <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-command-900 to-black text-center text-sm text-slate-300"><Video className="h-8 w-8 text-slate-600" aria-hidden />{unavailableCopy}</div>}</div><div className="flex flex-wrap gap-2 border-t border-white/10 p-4"><Link href={focusHref(camera)} className="inline-flex min-h-10 items-center gap-2 rounded-md bg-signal-cyan px-3 text-sm font-semibold text-command-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan"><Camera className="h-4 w-4" aria-hidden />Open camera wall</Link><Link href={focusHref(camera)} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-white/10 px-3 text-sm font-semibold text-slate-200 transition hover:border-signal-cyan/50 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan"><Eye className="h-4 w-4" aria-hidden />View details</Link></div></section>;
+function MetricGrid({ activeAlerts, criticalAlerts, openIncidents, camerasOnline, camerasOffline, evidenceAvailable }: { activeAlerts?: number; criticalAlerts?: number; openIncidents?: number; camerasOnline?: number; camerasOffline?: number; evidenceAvailable?: number }) {
+  const t = useTranslations("dashboard.metrics");
+  const metrics = [
+    { label: t("activeAlerts"), value: activeAlerts, icon: BellRing, tone: "warning" as const },
+    { label: t("criticalAlerts"), value: criticalAlerts, icon: ShieldAlert, tone: "danger" as const },
+    { label: t("openIncidents"), value: openIncidents, icon: ClipboardCheck, tone: "warning" as const },
+    { label: t("camerasOnline"), value: camerasOnline, icon: Camera, tone: "good" as const },
+    { label: t("camerasOffline"), value: camerasOffline, icon: CircleOff, tone: "danger" as const },
+    { label: t("evidenceAvailable"), value: evidenceAvailable, icon: FileSearch, tone: "neutral" as const },
+  ];
+  return <section className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6" aria-label="Current security summary">{metrics.map((metric) => <MetricCard key={metric.label} {...metric} />)}</section>;
 }
 
-function NeedsReview({ items, unavailable }: { items: ReviewItem[]; unavailable: boolean }) {
-  return <section className="glass-panel rounded-xl p-5 xl:col-start-2 xl:row-start-1 xl:row-span-2" aria-labelledby="needs-review-title"><div className="flex items-center justify-between gap-3"><div><p className="text-sm font-medium text-slate-400">Priority queue</p><h2 id="needs-review-title" className="mt-1 text-xl font-semibold text-white">Needs review</h2></div>{items.length ? <span className="rounded-full bg-amber-300/10 px-2.5 py-1 text-sm font-semibold text-amber-100">{items.length}</span> : null}</div>{unavailable ? <p className="mt-5 text-sm text-slate-400">Live data is temporarily unavailable.</p> : items.length === 0 ? <p className="mt-5 text-sm text-slate-400">Nothing needs review right now.</p> : <div className="mt-4 space-y-3">{items.slice(0, 5).map((item) => <ReviewCard key={item.camera.camera_id} item={item} />)}</div>}</section>;
+function MetricCard({ label, value, icon: Icon, tone }: { label: string; value?: number; icon: typeof BellRing; tone: "good" | "warning" | "danger" | "neutral" }) {
+  const t = useTranslations("dashboard.metrics");
+  return <article className={cn("rounded-xl border p-4", tone === "good" ? "border-emerald-300/20 bg-emerald-400/[0.045]" : tone === "warning" ? "border-amber-300/20 bg-amber-300/[0.04]" : tone === "danger" ? "border-eose-300/20 bg-rose-400/[0.04]" : "border-white/[0.1] bg-white/[0.025]")}><div className="flex items-center justify-between gap-3"><Icon className={cn("h-4.5 w-4.5", tone === "good" ? "text-emerald-200" : tone === "warning" ? "text-amber-100" : tone === "danger" ? "text-rose-200" : "text-signal-cyan")} aria-hidden /><span className="text-xs text-slate-500">{t("current")}</span></div><p className="mt-4 text-2xl font-semibold tracking-tight text-white">{typeof value === "number" ? value.toLocaleString() : t("unavailable")}</p><p className="mt-1 text-sm text-slate-400">{label}</p></article>;
 }
 
-function ReviewCard({ item }: { item: ReviewItem }) {
-  const Icon = item.kind === "offline" ? CircleOff : item.priority >= 2 ? AlertTriangle : Clock3;
-  const tone = item.kind === "offline" ? "border-slate-400/25 bg-white/[0.035] text-slate-200" : item.priority >= 2 ? "border-rose-300/30 bg-rose-400/[0.06] text-rose-100" : "border-amber-300/30 bg-amber-300/[0.06] text-amber-100";
-  return <article className={cn("rounded-lg border p-3.5", tone)}><div className="flex gap-3"><span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-command-950/45"><Icon className="h-4 w-4" aria-hidden /></span><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-white">{cameraName(item.camera)}</p><p className="mt-1 text-sm text-slate-300">{item.summary}</p><p className="mt-1 text-xs text-slate-400">{item.timestamp ? displayTime(item.timestamp) : "Time unavailable"}</p><div className="mt-3 flex flex-wrap gap-2"><Link href={focusHref(item.camera)} className="inline-flex min-h-8 flex-1 items-center justify-center rounded-md border border-signal-cyan/60 px-2 text-xs font-semibold text-signal-cyan transition hover:bg-signal-cyan/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan">Review</Link>{item.event ? <details className="group relative"><summary className="inline-flex min-h-8 cursor-pointer list-none items-center rounded-md border border-white/10 px-2 text-xs font-semibold text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan">Why did Aegis flag this?</summary><div className="absolute right-0 z-10 mt-2 w-72 rounded-md border border-white/10 bg-command-950 p-3 text-xs leading-relaxed text-slate-300 shadow-xl">{item.event.explanation ?? item.event.description ?? "An evidence explanation was not returned for this alert."}</div></details> : null}</div></div></div></article>;
+function NeedsAttention({ items, unavailable, onRetry }: { items: AttentionItem[]; unavailable: boolean; onRetry: () => void }) {
+  const t = useTranslations("dashboard.needsAttention");
+  return <section className="rounded-xl border border-white/[0.1] bg-white/[0.025] p-5 sm:p-6" aria-labelledby="needs-attention-title"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-signal-cyan">{t("priorityReview")}</p><h2 id="needs-attention-title" className="mt-1 text-xl font-semibold text-white">{t("title")}</h2></div>{items.length ? <span className="rounded-full bg-amber-300/10 px-2.5 py-1 text-sm font-semibold text-amber-100">{items.length}</span> : null}</div>{unavailable && !items.length ? <div className="mt-5 rounded-lg border border-eose-300/20 bg-rose-400/[0.05] p-4"><p className="text-sm font-medium text-rose-100">{t("unavailableInfo")}</p><button type="button" onClick={onRetry} className="mt-3 min-h-9 rounded-md border border-eose-300/30 px-3 text-sm font-semibold text-rose-100 transition hover:bg-rose-400/10">{t("retry")}</button></div> : items.length ? <div className="mt-4 divide-y divide-white/[0.08]">{items.slice(0, 5).map((item) => <AttentionRow key={item.id} item={item} />)}</div> : <div className="mt-5 flex items-center gap-3 rounded-lg border border-emerald-300/20 bg-emerald-400/[0.045] p-4 text-sm text-emerald-100"><CheckCircle2 className="h-5 w-5 shrink-0" aria-hidden />{t("nothingAttention")}</div>}</section>;
 }
 
-function CameraOverview({ cameras, counts, reviewItems, unavailable }: { cameras: CameraType[]; counts: { total: number; live: number; attention: number; offline: number }; reviewItems: ReviewItem[]; unavailable: boolean }) {
-  const attentionIds = new Set(reviewItems.map((item) => item.camera.camera_id));
-  const previewCameras = cameras.slice(0, 4);
-  return <section className="glass-panel rounded-xl p-5 xl:col-start-1 xl:row-start-3" aria-labelledby="camera-overview-title"><div className="flex flex-wrap items-end justify-between gap-3"><div><p className="text-sm font-medium text-slate-400">Camera overview</p><h2 id="camera-overview-title" className="mt-1 text-xl font-semibold text-white">Cameras</h2></div><Link href="/cameras" className="inline-flex min-h-9 items-center gap-1 text-sm font-semibold text-signal-cyan hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan">View all cameras<ChevronRight className="h-4 w-4" aria-hidden /></Link></div>{unavailable ? <p className="mt-5 text-sm text-slate-400">Live camera data is temporarily unavailable.</p> : <><div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4"><CountPill label="total" value={counts.total} /><CountPill label="live" value={counts.live} tone="good" /><CountPill label="need attention" value={counts.attention} tone="attention" /><CountPill label="offline" value={counts.offline} tone="offline" /></div>{cameras.length === 0 ? <p className="mt-5 text-sm text-slate-400">No cameras connected yet.</p> : <div className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">{previewCameras.map((camera) => <OverviewCamera key={camera.camera_id} camera={camera} attention={attentionIds.has(camera.camera_id)} />)}</div>}</>}</section>;
+function AttentionRow({ item }: { item: AttentionItem }) {
+  const t = useTranslations("dashboard.needsAttention");
+  const Icon = item.kind === "camera" ? CircleOff : item.kind === "evidence" ? FileSearch : item.kind === "incident" ? ClipboardCheck : item.kind === "detection" ? RadioTower : AlertTriangle;
+  const tone = item.priority === 4 ? "text-rose-200" : item.priority >= 3 ? "text-amber-100" : "text-signal-cyan";
+  return <article className="flex flex-wrap items-start gap-3 py-4 first:pt-0 last:pb-0"><span className={cn("mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/[0.1] bg-black/15", tone)}><Icon className="h-4.5 w-4.5" aria-hidden /></span><div className="min-w-0 flex-1"><p className="text-sm font-semibold text-white">{item.title}</p><p className="mt-1 text-sm text-slate-400">{item.detail}</p><p className="mt-1 text-xs text-slate-500">{[item.location, item.timestamp ? formatTimestamp(item.timestamp) : t("timeUnavailable")].filter(Boolean).join(" · ")}</p></div><Link href={item.href as any} className="inline-flex min-h-9 shrink-0 items-center rounded-md border border-signal-cyan/40 px-3 text-sm font-semibold text-signal-cyan transition hover:bg-signal-cyan/10">{t("review")}</Link></article>;
 }
 
-function OverviewCamera({ camera, attention }: { camera: CameraType; attention: boolean }) {
-  const condition = cameraCondition(camera);
-  const label = attention && condition === "live" ? "Needs attention" : conditionLabel(condition);
-  return <Link href={focusHref(camera)} className="group overflow-hidden rounded-lg border border-white/10 bg-black/20 transition hover:border-signal-cyan/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan"><div className="relative aspect-video bg-command-900">{condition === "live" ? <DashboardSnapshot camera={camera} className="h-full w-full object-cover" compact /> : <div className="absolute inset-0 flex items-center justify-center text-xs text-slate-400">{condition === "offline" ? "Camera offline" : condition === "delayed" ? "Live image is delayed" : "Preview unavailable"}</div>}</div><div className="flex items-center justify-between gap-2 p-2.5"><span className="min-w-0 truncate text-sm font-medium text-white">{cameraName(camera)}</span><span className={cn("inline-flex shrink-0 items-center gap-1.5 text-xs", label === "Live" ? "text-emerald-200" : label === "Offline" ? "text-slate-300" : "text-amber-100")}><span className={cn("h-2 w-2 rounded-full", label === "Live" ? "bg-emerald-400" : label === "Offline" ? "bg-slate-400" : "bg-amber-300")} />{label}</span></div></Link>;
+function QuickActions() {
+  const t = useTranslations("dashboard.quickActions");
+  const actions = [
+    { label: t("openCameraWall"), href: "/cameras", icon: Camera },
+    { label: t("reviewAlerts"), href: "/events", icon: BellRing },
+    { label: t("viewIncidents"), href: "/events", icon: ClipboardCheck },
+    { label: t("searchEvidence"), href: "/semantic", icon: FileSearch },
+  ];
+  return <section className="rounded-xl border border-white/[0.1] bg-white/[0.025] p-5 sm:p-6" aria-labelledby="quick-actions-title"><p className="text-xs font-semibold uppercase tracking-[0.18em] text-signal-cyan">{t("operatorTools")}</p><h2 id="quick-actions-title" className="mt-1 text-xl font-semibold text-white">{t("title")}</h2><div className="mt-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-1">{actions.map(({ label, href, icon: Icon }) => <Link key={label} href={href as any} className="flex min-h-12 items-center gap-3 rounded-lg border border-white/[0.1] bg-black/[0.14] px-3 text-sm font-semibold text-slate-200 transition hover:border-signal-cyan/45 hover:bg-signal-cyan/[0.055] hover:text-white"><Icon className="h-4.5 w-4.5 text-signal-cyan" aria-hidden />{label}</Link>)}</div></section>;
 }
 
-function RecentActivity({ items, unavailable }: { items: ReviewItem[]; unavailable: boolean }) {
-  return <section className="glass-panel rounded-xl p-5 xl:col-start-2 xl:row-start-3" aria-labelledby="recent-activity-title"><div className="flex items-end justify-between gap-3"><div><p className="text-sm font-medium text-slate-400">Latest updates</p><h2 id="recent-activity-title" className="mt-1 text-xl font-semibold text-white">Recent activity</h2></div><Link href="/events" className="inline-flex min-h-9 items-center gap-1 text-sm font-semibold text-signal-cyan hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan">View all activity<ChevronRight className="h-4 w-4" aria-hidden /></Link></div>{unavailable ? <p className="mt-5 text-sm text-slate-400">Live data is temporarily unavailable.</p> : items.length === 0 ? <p className="mt-5 text-sm text-slate-400">No operator-relevant activity yet.</p> : <div className="mt-4 space-y-2">{items.slice(0, 5).map((item) => <Link key={`activity-${item.camera.camera_id}`} href={focusHref(item.camera)} className="flex items-center gap-3 rounded-md border border-white/8 bg-black/20 p-3 transition hover:border-signal-cyan/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan"><span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-signal-cyan/10 text-signal-cyan"><Info className="h-4 w-4" aria-hidden /></span><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-white">{item.summary}</span><span className="mt-0.5 block truncate text-xs text-slate-400">{cameraName(item.camera)}</span></span><span className="shrink-0 text-xs text-slate-400">{item.timestamp ? displayTime(item.timestamp) : "Time unavailable"}</span></Link>)}</div>}</section>;
+function LatestCriticalActivity({ items, alertsAvailable, eventsAvailable }: { items: ActivityItem[]; alertsAvailable: boolean; eventsAvailable: boolean }) {
+  const t = useTranslations("dashboard.latestActivity");
+  const canShowActivity = alertsAvailable || eventsAvailable;
+  return <section className="rounded-xl border border-white/[0.1] bg-white/[0.025] p-5 sm:p-6" aria-labelledby="latest-critical-title"><div className="flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-signal-cyan">{t("recentPriority")}</p><h2 id="latest-critical-title" className="mt-1 text-xl font-semibold text-white">{t("title")}</h2></div><Link href="/events" className="inline-flex min-h-9 items-center gap-1 text-sm font-semibold text-signal-cyan transition hover:text-cyan-200">{t("viewAll")}</Link></div>{!canShowActivity ? <p className="mt-5 text-sm text-slate-400">{t("unavailable")}</p> : items.length ? <div className="mt-4 divide-y divide-white/[0.08]">{items.map((item) => <article key={item.id} className="flex items-start gap-3 py-3 first:pt-0 last:pb-0"><ShieldAlert className="mt-0.5 h-4.5 w-4.5 shrink-0 text-rose-200" aria-hidden /><div className="min-w-0 flex-1"><p className="text-sm font-semibold text-white">{item.title}</p>{item.detail ? <p className="mt-1 text-sm text-slate-400">{item.detail}</p> : null}<p className="mt-1 text-xs text-slate-500">{[item.camera, item.timestamp ? formatTimestamp(item.timestamp) : "Time unavailable"].filter(Boolean).join(" · ")}</p></div></article>)}</div> : <p className="mt-5 text-sm text-slate-400">{t("noHighPriority")}</p>}</section>;
 }
 
-function DashboardDiagnostics({ status, cameras, events, unavailable }: { status?: StatusResponse; cameras: CameraType[]; events: RiskEvent[]; unavailable: boolean }) {
-  return <details className="glass-panel rounded-xl p-4 xl:col-start-2 xl:row-start-4"><summary className="cursor-pointer list-none text-sm font-semibold text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan">Diagnostics</summary><dl className="mt-4 grid gap-3 text-sm sm:grid-cols-3"><DiagnosticRow label="Status data" value={unavailable ? "Unavailable" : status ? "Available" : "Not returned"} /><DiagnosticRow label="Camera sources" value={unavailable ? "Unavailable" : `${cameras.length} returned`} /><DiagnosticRow label="Alert records" value={unavailable ? "Unavailable" : `${events.length} returned`} /></dl></details>;
+function TodaySummary({ alerts, cameras, alertsAvailable, camerasAvailable }: { alerts?: OperationalAlert[]; cameras: CameraType[]; alertsAvailable: boolean; camerasAvailable: boolean }) {
+  const t = useTranslations("dashboard.todaySummary");
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const todayAlerts = alertsAvailable && alerts ? alerts.filter((alert) => dateValue(alert.timestamp) >= startOfToday.getTime()) : undefined;
+  const highestAlert = todayAlerts?.slice().sort((left, right) => priorityFromRisk(right.risk_level) - priorityFromRisk(left.risk_level) || dateValue(right.timestamp) - dateValue(left.timestamp))[0];
+  const highestCamera = highestAlert ? cameraName(cameras.find((camera) => camera.camera_id === highestAlert.camera_id), highestAlert.camera_name ?? highestAlert.camera_id) : undefined;
+  const cards = [
+    { label: t("alertsToday"), value: todayAlerts?.length },
+    { label: t("resolved"), value: undefined as number | undefined },
+    { label: t("stillOpen"), value: todayAlerts?.filter((alert) => !alert.acknowledged).length },
+  ];
+  return <section className="rounded-xl border border-white/[0.1] bg-white/[0.025] p-5 sm:p-6" aria-labelledby="today-summary-title"><p className="text-xs font-semibold uppercase tracking-[0.18em] text-signal-cyan">{t("today")}</p><h2 id="today-summary-title" className="mt-1 text-xl font-semibold text-white">{t("title")}</h2><div className="mt-5 grid gap-3 sm:grid-cols-3">{cards.map((card) => <div key={card.label} className="rounded-lg border border-white/[0.08] bg-black/[0.14] p-3"><p className="text-xs text-slate-500">{card.label}</p><p className="mt-2 text-xl font-semibold text-white">{typeof card.value === "number" ? card.value.toLocaleString() : t("unavailable")}</p></div>)}</div><div className="mt-4 rounded-lg border border-white/[0.08] bg-black/[0.14] p-3"><p className="text-xs text-slate-500">{t("highestRisk")}</p><p className="mt-2 text-sm font-semibold text-white">{alertsAvailable && camerasAvailable ? highestCamera ?? t("unavailable") : t("unavailable")}</p></div><p className="mt-3 text-xs leading-5 text-slate-500">{t("resolvedNotAvailable")}</p></section>;
 }
 
-function DiagnosticRow({ label, value }: { label: string; value: string }) { return <div className="rounded-md border border-white/8 bg-black/20 p-3"><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-1 font-medium text-slate-200">{value}</dd></div>; }
-function CountPill({ label, value, tone = "neutral" }: { label: string; value: number; tone?: "neutral" | "good" | "attention" | "offline" }) { return <div className={cn("rounded-md border p-3", tone === "good" ? "border-emerald-300/20 bg-emerald-400/[0.05]" : tone === "attention" ? "border-amber-300/20 bg-amber-300/[0.05]" : tone === "offline" ? "border-slate-400/20 bg-white/[0.03]" : "border-white/10 bg-black/15")}><p className="text-lg font-semibold text-white">{value}</p><p className="text-xs text-slate-400">{label}</p></div>; }
-function CameraStatus({ condition }: { condition: CameraCondition }) { const Icon = condition === "live" ? CheckCircle2 : condition === "offline" ? CircleOff : condition === "delayed" ? Clock3 : WifiOff; return <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold", condition === "live" ? "border-emerald-300/30 bg-emerald-400/10 text-emerald-100" : condition === "offline" ? "border-slate-300/20 bg-white/[0.05] text-slate-200" : "border-amber-300/30 bg-amber-300/10 text-amber-100")}><Icon className="h-3.5 w-3.5" aria-hidden />{conditionLabel(condition)}</span>; }
-function displayTime(value: string | number) { return typeof value === "string" ? formatTime(value) : new Date(value * 1_000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
-
-export function DashboardSnapshot({ camera, className, compact = false }: { camera: CameraType; className?: string; compact?: boolean }) {
-  const [generation, setGeneration] = useState(0);
-  const [failedGeneration, setFailedGeneration] = useState<number | null>(null);
-  const active = cameraCondition(camera) === "live";
-  useEffect(() => {
-    if (!active) return undefined;
-    const interval = window.setInterval(() => setGeneration((current) => current + 1), compact ? 7_000 : 4_000);
-    return () => window.clearInterval(interval);
-  }, [active, compact]);
-  const failed = failedGeneration === generation;
-  if (!active || failed) return <div className={cn("flex items-center justify-center bg-command-900 text-xs text-slate-400", className)}>Preview unavailable</div>;
-  // eslint-disable-next-line @next/next/no-img-element -- authenticated snapshot requests are throttled and flow through the server-side proxy.
-  return <img src={`${appConfig.apiUrl}/cameras/${encodeURIComponent(camera.camera_id)}/snapshot?dashboard=${generation}`} alt={`${cameraName(camera)} live view`} className={className} loading={compact ? "lazy" : "eager"} onError={() => setFailedGeneration(generation)} />;
+function SystemReadiness({ availability, status }: { availability: DashboardAvailability; status?: StatusResponse }) {
+  const t = useTranslations("dashboard.systemReadiness");
+  const system = getStatusSystem(status);
+  const rows = [
+    { label: t("liveUpdates"), value: availability.events ? t("ready") : t("unavailable"), tone: availability.events ? "good" : "muted" },
+    { label: t("detection"), value: !availability.status ? t("unavailable") : system.running === true ? t("ready") : system.running === false ? t("needsAttention") : t("unavailable"), tone: system.running === true && availability.status ? "good" : system.running === false && availability.status ? "warning" : "muted" },
+    { label: t("evidence"), value: availability.evidence ? t("ready") : t("unavailable"), tone: availability.evidence ? "good" : "muted" },
+    { label: t("storage"), value: availability.evidence ? t("available") : t("unavailable"), tone: availability.evidence ? "good" : "muted" },
+    { label: t("agent"), value: t("unavailable"), tone: "muted" },
+  ];
+  return <section className="mt-5 rounded-xl border border-white/[0.1] bg-white/[0.025] p-5 sm:p-6" aria-labelledby="system-readiness-title"><div className="flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-signal-cyan">{t("currentCapability")}</p><h2 id="system-readiness-title" className="mt-1 text-xl font-semibold text-white">{t("title")}</h2></div><Sparkles className="h-5 w-5 text-signal-cyan" aria-hidden /></div><div className="mt-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">{rows.map((row) => <div key={row.label} className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.08] bg-black/[0.14] px-3 py-3"><span className="text-sm text-slate-300">{row.label}</span><span className={cn("inline-flex items-center gap-1.5 text-xs font-semibold", row.tone === "good" ? "text-emerald-200" : row.tone === "warning" ? "text-amber-100" : "text-slate-400")}><span className={cn("h-2 w-2 rounded-full", row.tone === "good" ? "bg-emerald-400" : row.tone === "warning" ? "bg-amber-300" : "bg-slate-500")} />{row.value}</span></div>)}</div></section>;
 }
 
-function DashboardLoading() { return <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(330px,0.7fr)]" aria-busy="true" aria-label="Loading security overview"><div className="h-40 animate-pulse rounded-xl border border-white/10 bg-white/[0.035]" /><div className="h-64 animate-pulse rounded-xl border border-white/10 bg-white/[0.035] xl:row-span-2" /><div className="aspect-video animate-pulse rounded-xl border border-white/10 bg-white/[0.035]" /><div className="h-56 animate-pulse rounded-xl border border-white/10 bg-white/[0.035]" /></div>; }
+function DashboardLoading() {
+  return <section className="mx-auto w-full max-w-[1600px] px-4 py-6 sm:px-6 lg:px-8" aria-busy="true" aria-label="Loading operational overview"><div className="h-10 w-64 animate-pulse rounded bg-white/[0.07]" /><div className="mt-3 h-5 w-96 max-w-full animate-pulse rounded bg-white/[0.04]" /><div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">{Array.from({ length: 6 }).map((_, index) => <div key={index} className="h-32 animate-pulse rounded-xl border border-white/[0.1] bg-white/[0.025]" />)}</div><div className="mt-5 grid gap-5 xl:grid-cols-2"><div className="h-80 animate-pulse rounded-xl border border-white/[0.1] bg-white/[0.025]" /><div className="h-64 animate-pulse rounded-xl border border-white/[0.1] bg-white/[0.025]" /></div></section>;
+}
 
-export const operatorDashboardInternals = { cameraName, cameraCondition, buildReviewItems, cameraCounts, focusCamera, priorityFromEvent };
+export const operatorDashboardInternals = { buildAttentionItems, cameraCondition, cameraCounts, cameraName, priorityFromEvent, priorityFromRisk };

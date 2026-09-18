@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Aperture,
   Car,
   CheckCircle2,
   Crosshair,
@@ -22,12 +21,11 @@ import {
   WifiOff
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { EmptyState, LoadingState } from "@/components/layout/states";
-import { appConfig, resolveCameraWebSocketUrl } from "@/lib/config";
+import { EmptyState } from "@/components/layout/states";
+import { appConfig, createAuthenticatedWebSocket, resolveCameraWebSocketUrl } from "@/lib/config";
 import { cameraWebSocketMessageSchema } from "@/lib/schemas";
 import { formatPercent } from "@/lib/data-format";
 import { cn, formatTime } from "@/lib/utils";
-import { getErrorMessage } from "@/lib/errors";
 import {
   useCameraDetectionsQuery,
   useCameraEventsQuery,
@@ -61,10 +59,19 @@ const riskOrder: Record<RiskLevel, number> = {
   CRITICAL: 4
 };
 
-export function CameraCommandCenter({ camera }: { camera?: Camera }) {
+// A snapshot is a complete JPEG response, not a video frame. Refreshing it
+// faster than the backend can produce and decode it cancels the image load and
+// leaves the canvas black. The WebSocket path supplies faster updates when it
+// is configured; this is the reliable local fallback.
+const SNAPSHOT_PREVIEW_INTERVAL_MS = 500;
+
+export function CameraCommandCenter({ camera, cameraSwitcher }: { camera?: Camera; cameraSwitcher?: React.ReactNode }) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const activeBitmapRef = useRef<ImageBitmap | null>(null);
+  const drawOverlayRef = useRef<() => void>(() => {});
+  const [wsDetections, setWsDetections] = useState<Track[] | null>(null);
   const zoneStartRef = useRef<ZonePoint | null>(null);
   const [frame, setFrame] = useState("");
   const [snapshotGeneration, setSnapshotGeneration] = useState(0);
@@ -88,7 +95,15 @@ export function CameraCommandCenter({ camera }: { camera?: Camera }) {
   const stopCamera = useStopCameraMutation();
   const updateCamera = useUpdateCameraMutation();
 
-  const detections = useMemo(() => filterCurrentDetections(detectionsQuery.data?.detections ?? []), [detectionsQuery.data?.detections]);
+  const detections = useMemo(
+    () => {
+      if (wsDetections) return wsDetections;
+      return camera?.runtime.status === "online"
+        ? filterCurrentDetections(detectionsQuery.data?.detections ?? [], Date.now())
+        : [];
+    },
+    [camera?.runtime.status, detectionsQuery.data?.detections, wsDetections]
+  );
   const events = useMemo(() => eventsQuery.data?.events ?? [], [eventsQuery.data?.events]);
   const zones = overlaysQuery.data?.zones ?? [];
   const heatmap = overlaysQuery.data?.heatmap ?? [];
@@ -98,7 +113,10 @@ export function CameraCommandCenter({ camera }: { camera?: Camera }) {
   useEffect(() => {
     const canRefreshSnapshot = camera?.runtime.status === "online" && camera.runtime.running;
     if (!canRefreshSnapshot) return undefined;
-    const timer = window.setInterval(() => setSnapshotGeneration((value) => value + 1), 1_000);
+    const timer = window.setInterval(
+      () => setSnapshotGeneration((value) => value + 1),
+      SNAPSHOT_PREVIEW_INTERVAL_MS,
+    );
     return () => window.clearInterval(timer);
   }, [camera?.camera_id, camera?.runtime.running, camera?.runtime.status]);
 
@@ -110,7 +128,7 @@ export function CameraCommandCenter({ camera }: { camera?: Camera }) {
     if (!url) {
       const unavailableTimer = window.setTimeout(() => {
         setSocketState("unavailable");
-        setMessage("Live stream endpoint is not configured.");
+        setMessage("Live stream is not configured.");
       }, 0);
       return () => window.clearTimeout(unavailableTimer);
     }
@@ -122,15 +140,20 @@ export function CameraCommandCenter({ camera }: { camera?: Camera }) {
     let connectTimer: number | undefined;
     let retryTimer: number | undefined;
 
-    function connect() {
+    async function connect() {
       if (disposed) return;
       setSocketState(retryCount > 0 ? "reconnecting" : "connecting");
+      opened = false;
 
       try {
-        socket = new WebSocket(url);
+        socket = await createAuthenticatedWebSocket(url);
+        if (disposed) {
+          socket.close();
+          return;
+        }
       } catch {
         setSocketState("unavailable");
-        setMessage("Live stream endpoint unavailable.");
+        setMessage("Live stream is temporarily unavailable.");
         return;
       }
 
@@ -150,17 +173,32 @@ export function CameraCommandCenter({ camera }: { camera?: Camera }) {
           const parsed = cameraWebSocketMessageSchema.safeParse(JSON.parse(event.data));
           if (!parsed.success) {
             setSocketState("error");
-            setMessage("Camera frame message failed frontend validation.");
+            setMessage("A live image update could not be read.");
             return;
           }
 
           if (parsed.data.type === "frame" && parsed.data.frame) {
             setFrame(parsed.data.frame);
+            if (parsed.data.detections) {
+              setWsDetections(parsed.data.detections);
+            }
+
+            // Async decode frame for precise canvas rendering
+            fetch(parsed.data.frame)
+              .then((res) => res.blob())
+              .then(createImageBitmap)
+              .then((bitmap) => {
+                if (activeBitmapRef.current) activeBitmapRef.current.close();
+                activeBitmapRef.current = bitmap;
+                requestAnimationFrame(() => drawOverlayRef.current());
+              })
+              .catch(() => {});
+
             setMessage("");
             return;
           }
 
-          setMessage(parsed.data.message ?? parsed.data.error_message ?? "");
+          setMessage(parsed.data.message || parsed.data.error_message ? "Live stream needs attention." : "");
         } catch {
           setSocketState("error");
           setMessage("Camera frame message was not valid JSON.");
@@ -170,7 +208,7 @@ export function CameraCommandCenter({ camera }: { camera?: Camera }) {
       socket.onerror = () => {
         if (disposed) return;
         setSocketState("unavailable");
-        setMessage("Live stream endpoint unavailable.");
+        setMessage("Live stream is temporarily unavailable.");
       };
 
       socket.onclose = () => {
@@ -179,18 +217,18 @@ export function CameraCommandCenter({ camera }: { camera?: Camera }) {
         // not a live camera reconnect. Do not create a noisy retry loop.
         if (!opened) {
           setSocketState("unavailable");
-          setMessage("Live stream endpoint unavailable.");
+          setMessage("Live stream is temporarily unavailable.");
           return;
         }
         retryCount += 1;
         setSocketState("reconnecting");
-        retryTimer = window.setTimeout(connect, Math.min(15_000, 1_000 * 2 ** retryCount));
+        retryTimer = window.setTimeout(() => void connect(), Math.min(15_000, 1_000 * 2 ** retryCount));
       };
     }
 
     // Let React development-mode cleanup cancel before construction. This
     // prevents a browser warning for a deliberately closed connecting socket.
-    connectTimer = window.setTimeout(connect, 0);
+    connectTimer = window.setTimeout(() => void connect(), 0);
 
     return () => {
       disposed = true;
@@ -202,10 +240,10 @@ export function CameraCommandCenter({ camera }: { camera?: Camera }) {
 
   useEffect(() => {
     drawOverlay();
-    const image = imageRef.current;
-    if (!image || typeof ResizeObserver === "undefined") return undefined;
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver(() => drawOverlay());
-    observer.observe(image);
+    observer.observe(canvas.parentElement || canvas);
     return () => observer.disconnect();
     // drawOverlay deliberately redraws only when visual inputs change; making
     // its render-scoped helper a dependency would redraw after every state
@@ -213,12 +251,13 @@ export function CameraCommandCenter({ camera }: { camera?: Camera }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detections, frame, heatmap, showDetections, showHeatmap, showZones, snapshotGeneration, zoneDraft, zones]);
 
+  drawOverlayRef.current = drawOverlay;
   function drawOverlay() {
-    const image = imageRef.current;
     const canvas = canvasRef.current;
-    if (!image || !canvas) return;
+    const container = canvas?.parentElement;
+    if (!container || !canvas) return;
 
-    const rect = image.getBoundingClientRect();
+    const rect = container.getBoundingClientRect();
     const pixelRatio = window.devicePixelRatio || 1;
     canvas.width = Math.max(1, Math.round(rect.width * pixelRatio));
     canvas.height = Math.max(1, Math.round(rect.height * pixelRatio));
@@ -230,15 +269,39 @@ export function CameraCommandCenter({ camera }: { camera?: Camera }) {
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     context.clearRect(0, 0, rect.width, rect.height);
 
-    if (!previewSource) {
+    if (!activeBitmapRef.current && !previewSource) {
       setOverlayMessage("");
       return;
     }
 
-    const geometry = overlayGeometry(image, rect.width, rect.height);
+    const imageToMeasure = activeBitmapRef.current ? { naturalWidth: activeBitmapRef.current.width, naturalHeight: activeBitmapRef.current.height } : imageRef.current;
+    if (!imageToMeasure) return;
+    const geometry = overlayGeometry(imageToMeasure, rect.width, rect.height);
     if (!geometry) {
       setOverlayMessage("");
       return;
+    }
+
+    // The source <img> remains hidden so the canvas can carry the image and
+    // its overlays as one surface. Draw it before any zones or detections.
+    if (activeBitmapRef.current) {
+      const bitmap = activeBitmapRef.current;
+      context.drawImage(
+        bitmap,
+        geometry.offsetX,
+        geometry.offsetY,
+        bitmap.width * geometry.scale,
+        bitmap.height * geometry.scale,
+      );
+    } else if (imageRef.current) {
+      const image = imageRef.current;
+      context.drawImage(
+        image,
+        geometry.offsetX,
+        geometry.offsetY,
+        image.naturalWidth * geometry.scale,
+        image.naturalHeight * geometry.scale,
+      );
     }
 
     const messages: string[] = [];
@@ -262,7 +325,7 @@ export function CameraCommandCenter({ camera }: { camera?: Camera }) {
     if (showDetections) {
       const drawable = detections.filter((detection) => Array.isArray(detection.bbox));
       if (detections.length > 0 && drawable.length === 0) {
-        messages.push("Detection boxes unavailable: backend did not return bbox.");
+        messages.push("Detection outlines are unavailable for this image.");
       }
       const occupiedLabels: Array<{ left: number; top: number; width: number; height: number }> = [];
       for (const detection of drawable) {
@@ -315,7 +378,10 @@ function openSnapshot() {
     const image = imageRef.current;
     if (!image) return null;
     const rect = image.getBoundingClientRect();
-    const geometry = overlayGeometry(image, rect.width, rect.height);
+
+    const imageToMeasure = activeBitmapRef.current ? { naturalWidth: activeBitmapRef.current.width, naturalHeight: activeBitmapRef.current.height } : imageRef.current;
+    if (!imageToMeasure) return null;
+    const geometry = overlayGeometry(imageToMeasure, rect.width, rect.height);
     if (!geometry) return null;
     const x = (event.clientX - rect.left - geometry.offsetX) / geometry.scale;
     const y = (event.clientY - rect.top - geometry.offsetY) / geometry.scale;
@@ -380,67 +446,70 @@ function openSnapshot() {
   const usingSnapshotPreview = Boolean(previewSource && !frame);
   const hasLivePreview = Boolean(frame && canUseSnapshot) || (canUseSnapshot && loadedSnapshotCameraId === camera.camera_id);
   const cameraStatus = cameraOperatorStatus(camera, socketState, summary, eventsQuery.isLoading || detectionsQuery.isLoading, eventsQuery.isError || detectionsQuery.isError, hasLivePreview);
+  const connectionSignal = cameraConnectionSignal(camera, socketState, hasLivePreview);
+  const riskSignal = cameraRiskSignal(summary.riskLevel);
+  const latestSignal = recentActivity[0] ? activityStatus(recentActivity[0]) : null;
   const displayName = cameraOperatorName(camera);
-  const cameraSubtitle = cameraOperatorSubtitle(camera, cameraStatus.badge);
 
   return (
-    <div className="grid min-h-[640px] gap-4 xl:h-[min(70vh,720px)] xl:grid-cols-[minmax(220px,0.65fr)_minmax(0,1.8fr)_minmax(260px,0.78fr)]">
-      <aside className="glass-panel rounded-xl p-4 sm:p-5 xl:h-full xl:overflow-y-auto" aria-labelledby="live-activity-title">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-signal-cyan">Live activity</p>
-            <h2 id="live-activity-title" className="mt-1 text-xl font-semibold text-white">Happening now</h2>
-          </div>
-          <ScanLine className="h-5 w-5 text-signal-cyan" aria-hidden />
+    <div className="grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)] xl:items-stretch 2xl:grid-cols-[250px_minmax(0,1fr)]">
+      <aside className="order-3 overflow-hidden rounded-xl border border-white/10 bg-command-950/72 shadow-xl xl:order-1" aria-labelledby="live-signals-title">
+        <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3.5">
+          <h2 id="live-signals-title" className="text-sm font-semibold text-white">Live Signals</h2>
+          <ScanLine className="h-4 w-4 text-signal-cyan" aria-hidden />
         </div>
-
-        <div className="mt-5 grid gap-3">
-          <SummaryMetric icon={Users} label="People" value={summary.people} />
-          <SummaryMetric icon={Car} label="Vehicles" value={summary.vehicles} />
-          <SummaryMetric icon={ShieldAlert} label="Recent activity" value={recentActivity.length} tone={recentActivity.length > 0 ? "warning" : "normal"} />
-          {summary.weapons > 0 ? <SummaryMetric icon={ShieldAlert} label="High-priority items" value={summary.weapons} tone="warning" /> : null}
-        </div>
-
-        <div className={cn("mt-5 rounded-lg border p-3.5", cameraStatus.tone === "danger" ? "border-amber-300/35 bg-amber-300/[0.07]" : cameraStatus.tone === "offline" ? "border-rose-400/30 bg-rose-500/[0.06]" : "border-emerald-300/25 bg-emerald-400/[0.05]")}>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Status</p>
-          <div className="mt-2 flex items-center gap-2">
-            {cameraStatus.tone === "offline" ? <WifiOff className="h-4 w-4 text-rose-200" aria-hidden /> : cameraStatus.tone === "danger" ? <ShieldAlert className="h-4 w-4 text-amber-200" aria-hidden /> : <CheckCircle2 className="h-4 w-4 text-emerald-300" aria-hidden />}
-            <span className={cn("text-base font-semibold", cameraStatus.tone === "offline" ? "text-rose-100" : cameraStatus.tone === "danger" ? "text-amber-100" : "text-emerald-100")}>{cameraStatus.label}</span>
-          </div>
-          <p className="mt-1 text-xs leading-relaxed text-slate-300">{cameraStatus.detail}</p>
-        </div>
+        <dl className="grid grid-cols-2 xl:block">
+          <LiveSignalRow icon={Users} label="People" value={summary.people} tone="cyan" />
+          <LiveSignalRow icon={Car} label="Vehicles" value={summary.vehicles} tone="cyan" />
+          <LiveSignalRow icon={connectionSignal.tone === "offline" ? WifiOff : Video} label="Camera status" value={connectionSignal.label} tone={connectionSignal.tone} />
+          <LiveSignalRow icon={riskSignal.tone === "danger" || riskSignal.tone === "attention" ? ShieldAlert : CheckCircle2} label="Current risk" value={riskSignal.label} tone={riskSignal.tone} />
+          {latestSignal ? (
+            <LiveSignalRow
+              className="col-span-2"
+              icon={Crosshair}
+              label="Latest signal"
+              value={latestSignal.summary}
+              tone={latestSignal.tone === "high" ? "danger" : latestSignal.tone === "attention" ? "attention" : "cyan"}
+              compact
+            />
+          ) : null}
+        </dl>
       </aside>
 
-      <section ref={panelRef} className="glass-panel min-w-0 overflow-hidden rounded-xl xl:h-full" aria-labelledby="selected-camera-title">
-        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-white/10 px-4 py-4 sm:px-5">
+      <section ref={panelRef} className="relative order-1 min-w-0 overflow-hidden rounded-xl border border-white/10 bg-black shadow-2xl xl:order-2 xl:h-[clamp(520px,68vh,720px)]" aria-labelledby="selected-camera-title">
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start justify-between gap-3 bg-gradient-to-b from-black/90 via-black/55 to-transparent px-4 pb-12 pt-4 sm:px-5">
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2.5">
-              <h2 id="selected-camera-title" className="truncate text-xl font-semibold text-white">{displayName}</h2>
-              <span className={cn("rounded-full border px-2.5 py-1 text-xs font-semibold", cameraStatus.tone === "live" ? "border-emerald-300/40 bg-emerald-400/[0.10] text-emerald-200" : cameraStatus.tone === "offline" ? "border-rose-300/30 bg-rose-400/[0.08] text-rose-100" : "border-amber-300/35 bg-amber-300/[0.08] text-amber-100")}>{cameraStatus.badge}</span>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 id="selected-camera-title" className="truncate text-base font-semibold text-white sm:text-lg">{displayName}</h2>
+              <span className={cn("rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em]", signalBadgeClass(connectionSignal.tone))}>{connectionSignal.label}</span>
+              <span className={cn("rounded-md border px-2 py-1 text-[10px] font-semibold", signalBadgeClass(riskSignal.tone))}>{riskSignal.label}</span>
             </div>
-            <p className="mt-1.5 text-sm text-slate-400">{cameraSubtitle}</p>
+            <p className="mt-1 text-xs text-slate-300">{connectionSignal.tone === "offline" ? "Monitoring unavailable" : "AI monitoring active"}</p>
           </div>
 
-          <details className="group relative shrink-0">
-            <summary className="cursor-pointer list-none rounded-md border border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-signal-cyan/35 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan">
-              <span className="inline-flex items-center gap-1.5"><Info className="h-3.5 w-3.5" aria-hidden /> Details</span>
+          <div className="pointer-events-auto flex shrink-0 items-start gap-2">
+            <span className="hidden pt-2 text-xs text-slate-300 md:inline">{formatTime(camera.runtime.last_frame_time ?? undefined)}</span>
+            <details className="group relative">
+            <summary className="cursor-pointer list-none rounded-md border border-white/15 bg-black/45 px-2.5 py-2 text-xs font-medium text-slate-200 backdrop-blur-md transition hover:border-signal-cyan/45 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan">
+              <span className="inline-flex items-center gap-1.5"><Info className="h-3.5 w-3.5" aria-hidden /><span className="hidden sm:inline">Details</span></span>
             </summary>
-            <div className="absolute right-0 z-30 mt-2 w-72 rounded-lg border border-white/10 bg-command-950 p-3 text-xs shadow-2xl">
+            <div className="absolute end-0 z-40 mt-2 w-72 rounded-lg border border-white/10 bg-command-950 p-3 text-xs shadow-2xl">
               <p className="font-semibold text-white">Camera diagnostics</p>
               <dl className="mt-3 grid gap-2 text-slate-300">
-                <div className="flex justify-between gap-3"><dt>Source</dt><dd className="text-right text-white">{sourceLabel(camera.source_type)}</dd></div>
-                <div className="flex justify-between gap-3"><dt>Resolution</dt><dd className="text-right text-white">{camera.runtime.width && camera.runtime.height ? `${camera.runtime.width} × ${camera.runtime.height}` : "Unavailable"}</dd></div>
-                <div className="flex justify-between gap-3"><dt>Frame rate</dt><dd className="text-right text-white">{camera.runtime.fps == null ? "Unavailable" : `${camera.runtime.fps.toFixed(1)} FPS`}</dd></div>
-                <div className="flex justify-between gap-3"><dt>Last frame</dt><dd className="text-right text-white">{formatTime(camera.runtime.last_frame_time ?? undefined)}</dd></div>
-                <div className="flex justify-between gap-3"><dt>Pipeline</dt><dd className="text-right text-white">{camera.runtime.running ? "Running" : "Stopped"}</dd></div>
-                <div className="flex justify-between gap-3"><dt>Camera reference</dt><dd className="max-w-36 break-all text-right text-white">{camera.camera_id}</dd></div>
+                <div className="flex justify-between gap-3"><dt>Source</dt><dd className="text-end text-white">{sourceLabel(camera.source_type)}</dd></div>
+                <div className="flex justify-between gap-3"><dt>Resolution</dt><dd className="text-end text-white">{camera.runtime.width && camera.runtime.height ? `${camera.runtime.width} × ${camera.runtime.height}` : "Unavailable"}</dd></div>
+                <div className="flex justify-between gap-3"><dt>Frame rate</dt><dd className="text-end text-white">{camera.runtime.fps == null ? "Unavailable" : `${camera.runtime.fps.toFixed(1)} FPS`}</dd></div>
+                <div className="flex justify-between gap-3"><dt>Last frame</dt><dd className="text-end text-white">{formatTime(camera.runtime.last_frame_time ?? undefined)}</dd></div>
+                <div className="flex justify-between gap-3"><dt>Pipeline</dt><dd className="text-end text-white">{camera.runtime.running ? "Running" : "Stopped"}</dd></div>
+                <div className="flex justify-between gap-3"><dt>Camera reference</dt><dd className="max-w-36 break-all text-end text-white">{camera.camera_id}</dd></div>
               </dl>
-              {camera.runtime.error_message ? <p className="mt-3 rounded border border-rose-300/25 bg-rose-400/[0.06] p-2 text-rose-100">{camera.runtime.error_message}</p> : null}
+              {camera.runtime.error_message ? <p className="mt-3 rounded border border-eose-300/25 bg-rose-400/[0.06] p-2 text-rose-100">Camera needs attention. Check the camera connection and setup.</p> : null}
             </div>
           </details>
+          </div>
         </div>
 
-        <div className="relative aspect-video min-h-[420px] bg-black">
+        <div className="relative aspect-video min-h-[280px] bg-black sm:min-h-[380px] lg:min-h-[480px] xl:h-full xl:min-h-0 xl:aspect-auto">
           {previewSource ? (
             <>
               {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -448,7 +517,7 @@ function openSnapshot() {
                 ref={imageRef}
                 src={previewSource}
                 alt={`${displayName} live preview`}
-                className="h-full w-full object-contain"
+                className="hidden"
                 onLoad={() => {
                   if (usingSnapshotPreview) setLoadedSnapshotCameraId(camera.camera_id);
                   drawOverlay();
@@ -470,13 +539,13 @@ function openSnapshot() {
           )}
 
           {overlayMessage ? (
-            <p className="absolute left-4 top-4 rounded-md border border-amber-300/25 bg-command-950/88 px-3 py-2 text-xs text-amber-100">
+            <p className="absolute start-4 top-20 z-20 rounded-md border border-amber-300/25 bg-command-950/88 px-3 py-2 text-xs text-amber-100">
               {overlayMessage}
             </p>
           ) : null}
 
           {showZones ? (
-            <div className="absolute right-4 top-4 z-20 w-64 rounded-md border border-white/10 bg-command-950/90 p-3 text-xs shadow-xl backdrop-blur-xl">
+            <div className="absolute inset-x-3 top-20 z-20 max-h-[calc(100%-7rem)] overflow-y-auto rounded-md border border-white/10 bg-command-950/94 p-3 text-xs shadow-xl backdrop-blur-xl sm:start-auto sm:end-4 sm:w-64">
               <div className="flex items-center justify-between gap-3">
                 <p className="font-medium text-white">Camera zones</p>
                 <span className="rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-slate-300">{zones.length} saved</span>
@@ -507,7 +576,7 @@ function openSnapshot() {
                 </Button>
               </div>
               {zones.length ? (
-                <div className="mt-3 max-h-28 space-y-1 overflow-y-auto pr-1">
+                <div className="mt-3 max-h-28 space-y-1 overflow-y-auto pe-1">
                   {zones.map((zone) => (
                     <div key={zone.zone_id} className="flex items-center justify-between gap-2 rounded border border-white/8 bg-white/[0.035] px-2 py-1.5">
                       <span className="min-w-0 truncate text-slate-200">{zone.name}</span>
@@ -535,70 +604,60 @@ function openSnapshot() {
             />
           ) : null}
 
-          <div className="absolute inset-x-4 bottom-4 z-20 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-white/10 bg-command-950/82 p-2 backdrop-blur-xl">
-            <div className="flex flex-wrap gap-2">
-              <ToggleButton pressed={showDetections} onClick={() => setShowDetections((value) => !value)} icon={Crosshair} label="View detections" />
-              <ToggleButton pressed={showZones} onClick={() => setShowZones((value) => !value)} icon={Map} label="Zones" />
-              <ToggleButton pressed={showHeatmap} onClick={() => setShowHeatmap((value) => !value)} icon={Flame} label="Heatmap" />
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <ToolbarButton onClick={openSnapshot} icon={Download} label="Snapshot" />
-              <ToolbarButton onClick={openFullscreen} icon={Expand} label="Fullscreen" />
-              <Button type="button" variant={camera.runtime.running ? "secondary" : "primary"} className="min-h-9 px-3" disabled={busy} onClick={toggleProcessing}>
-                {camera.runtime.running ? <Square className="h-4 w-4" aria-hidden /> : <Play className="h-4 w-4" aria-hidden />}
-                {camera.runtime.running ? "Stop" : "Start"}
-              </Button>
-            </div>
+        </div>
+
+        <div className="relative z-30 border-t border-white/10 bg-command-950/96 p-2 backdrop-blur-xl lg:absolute lg:bottom-4 lg:start-1/2 lg:w-[min(calc(100%-2rem),760px)] lg:-translate-x-1/2 lg:rounded-xl lg:border">
+          <div className="grid grid-cols-3 gap-1 sm:grid-cols-6">
+            <ToggleButton pressed={showDetections} onClick={() => setShowDetections((value) => !value)} icon={Crosshair} label="Detections" ariaLabel="View detections" />
+            <ToggleButton pressed={showZones} onClick={() => setShowZones((value) => !value)} icon={Map} label="Zones" />
+            <ToggleButton pressed={showHeatmap} onClick={() => setShowHeatmap((value) => !value)} icon={Flame} label="Heatmap" />
+            <ToolbarButton onClick={openSnapshot} icon={Download} label="Snapshot" />
+            <ToolbarButton onClick={openFullscreen} icon={Expand} label="Fullscreen" />
+            <button
+              type="button"
+              className={cn("inline-flex min-h-14 flex-col items-center justify-center gap-1 rounded-lg px-2 py-2 text-[11px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan disabled:opacity-45", camera.runtime.running ? "text-rose-300 hover:bg-rose-400/10" : "text-signal-cyan hover:bg-signal-cyan/10")}
+              disabled={busy}
+              onClick={toggleProcessing}
+            >
+              {camera.runtime.running ? <Square className="h-5 w-5" aria-hidden /> : <Play className="h-5 w-5" aria-hidden />}
+              {camera.runtime.running ? "Stop" : "Start"}
+            </button>
           </div>
         </div>
       </section>
 
-      <aside className="glass-panel min-w-0 rounded-xl p-4 sm:p-5 xl:h-full xl:overflow-y-auto" aria-labelledby="recent-activity-title">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-signal-cyan">Review queue</p>
-            <h2 id="recent-activity-title" className="mt-1 text-xl font-semibold text-white">Recent activity</h2>
-          </div>
-          <Aperture className="h-5 w-5 text-signal-cyan" aria-hidden />
-        </div>
+      {cameraSwitcher ? <div className="order-2 min-w-0 xl:order-3 xl:col-start-2">{cameraSwitcher}</div> : null}
 
-        <div className="mt-4">
-          {eventsQuery.isLoading ? <LoadingState label="Loading activity" /> : null}
-          {eventsQuery.isError ? <ConciseDataError error={eventsQuery.error} /> : null}
-          {!eventsQuery.isLoading && !eventsQuery.isError && events.length === 0 ? (
-            <EmptyState title="No activity to review." description="" />
-          ) : null}
-          <div className="space-y-3">
-            {recentActivity.map((event, index) => (
-              <RecentActivityCard key={eventKey(event, index)} event={event} />
-            ))}
-          </div>
-        </div>
-      </aside>
     </div>
   );
 }
 
-function SummaryMetric({
+type LiveSignalTone = "cyan" | "live" | "attention" | "danger" | "offline";
+
+function LiveSignalRow({
   icon: Icon,
   label,
   value,
-  tone = "normal"
+  tone,
+  compact = false,
+  className
 }: {
   icon: React.ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
   label: string;
-  value: number;
-  tone?: "normal" | "warning";
+  value: React.ReactNode;
+  tone: LiveSignalTone;
+  compact?: boolean;
+  className?: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-md border border-white/10 bg-black/20 p-3">
-      <div className="flex items-center gap-3">
-        <span className={cn("flex h-9 w-9 items-center justify-center rounded-md border", tone === "warning" ? "border-amber-300/30 bg-amber-300/10 text-amber-200" : "border-signal-cyan/20 bg-signal-cyan/10 text-signal-cyan")}>
-          <Icon className="h-4 w-4" aria-hidden />
-        </span>
-        <span className="text-sm text-slate-300">{label}</span>
+    <div className={cn("flex min-h-[76px] items-center gap-3 border-t border-white/8 px-4 py-3 first:border-t-0 xl:min-h-[88px]", className)}>
+      <span className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-full border bg-black/25", signalIconClass(tone))}>
+        <Icon className="h-4 w-4" aria-hidden />
+      </span>
+      <div className="min-w-0">
+        <dt className="text-xs text-slate-400">{label}</dt>
+        <dd className={cn("mt-1 font-semibold", compact ? "line-clamp-2 text-xs leading-relaxed" : "truncate text-base", signalTextClass(tone))}>{value}</dd>
       </div>
-      <span className="font-mono text-lg text-white">{value}</span>
     </div>
   );
 }
@@ -607,26 +666,29 @@ function ToggleButton({
   pressed,
   onClick,
   icon: Icon,
-  label
+  label,
+  ariaLabel
 }: {
   pressed: boolean;
   onClick: () => void;
   icon: React.ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
   label: string;
+  ariaLabel?: string;
 }) {
   return (
     <button
       type="button"
       className={cn(
-        "inline-flex min-h-9 items-center gap-2 rounded-md border px-3 text-xs font-medium transition",
-        pressed ? "border-signal-cyan/35 bg-signal-cyan/12 text-signal-cyan" : "border-white/10 bg-white/[0.04] text-slate-300 hover:bg-white/10"
+        "inline-flex min-h-14 flex-col items-center justify-center gap-1 rounded-lg px-2 py-2 text-[11px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan",
+        pressed ? "bg-signal-cyan/12 text-signal-cyan" : "text-slate-300 hover:bg-white/[0.07] hover:text-white"
       )}
       onClick={onClick}
       aria-pressed={pressed}
+      aria-label={ariaLabel}
       title={label}
     >
-      <Icon className="h-4 w-4" aria-hidden />
-      <span className="hidden sm:inline">{label}</span>
+      <Icon className="h-5 w-5" aria-hidden />
+      <span>{label}</span>
     </button>
   );
 }
@@ -643,68 +705,68 @@ function ToolbarButton({
   return (
     <button
       type="button"
-      className="inline-flex min-h-9 items-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 text-xs font-medium text-slate-300 transition hover:bg-white/10 hover:text-white"
+      className="inline-flex min-h-14 flex-col items-center justify-center gap-1 rounded-lg px-2 py-2 text-[11px] font-medium text-slate-300 transition hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan"
       onClick={onClick}
       title={label}
     >
-      <Icon className="h-4 w-4" aria-hidden />
-      <span className="hidden sm:inline">{label}</span>
+      <Icon className="h-5 w-5" aria-hidden />
+      <span>{label}</span>
     </button>
   );
 }
 
-function RecentActivityCard({ event }: { event: RiskEvent }) {
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const status = activityStatus(event);
-
-  return (
-    <article className={cn("rounded-lg border p-3.5", status.tone === "high" ? "border-amber-300/45 bg-amber-300/[0.07]" : status.tone === "attention" ? "border-signal-cyan/35 bg-signal-cyan/[0.05]" : "border-emerald-300/30 bg-emerald-400/[0.045]")}>
-      <div className="flex items-start gap-3">
-        <span className={cn("mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border", status.tone === "high" ? "border-amber-300/55 text-amber-200" : status.tone === "attention" ? "border-signal-cyan/45 text-signal-cyan" : "border-emerald-300/45 text-emerald-200")}>
-          {status.tone === "high" ? <ShieldAlert className="h-4 w-4" aria-hidden /> : status.tone === "attention" ? <Aperture className="h-4 w-4" aria-hidden /> : <CheckCircle2 className="h-4 w-4" aria-hidden />}
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold leading-snug text-white">{status.summary}</p>
-          <p className="mt-1 text-xs text-slate-400">{formatTime(String(event.timestamp ?? ""))}</p>
-          <button type="button" onClick={() => setDetailsOpen((open) => !open)} className="mt-3 inline-flex min-h-8 items-center text-xs font-semibold text-signal-cyan hover:text-cyan-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan">
-            {detailsOpen ? "Hide details" : "View details"}
-          </button>
-        </div>
-      </div>
-      {detailsOpen ? <ActivityDetails event={event} /> : null}
-    </article>
-  );
+function signalIconClass(tone: LiveSignalTone) {
+  if (tone === "live") return "border-emerald-300/30 text-emerald-300";
+  if (tone === "attention") return "border-amber-300/35 text-amber-200";
+  if (tone === "danger") return "border-eose-300/40 text-rose-300";
+  if (tone === "offline") return "border-slate-400/25 text-slate-400";
+  return "border-signal-cyan/30 text-signal-cyan";
 }
 
-function ActivityDetails({ event }: { event: RiskEvent }) {
-  return (
-    <details open className="mt-3 border-t border-white/10 pt-3">
-      <summary className="cursor-pointer text-xs font-semibold text-slate-200">Why did Aegis flag this?</summary>
-      <dl className="mt-3 grid gap-2 text-xs text-slate-400">
-        <div className="flex justify-between gap-4"><dt>Object</dt><dd className="text-right text-white">{event.object_class ?? event.object_type ?? event.class_name ?? "Unavailable"}</dd></div>
-        <div className="flex justify-between gap-4"><dt>Confidence</dt><dd className="text-right text-white">{formatPercent(event.confidence, "Unavailable")}</dd></div>
-        <div className="flex justify-between gap-4"><dt>Track reference</dt><dd className="max-w-36 break-all text-right text-white">{event.track_id == null ? "Unavailable" : String(event.track_id)}</dd></div>
-        <div className="flex justify-between gap-4"><dt>Reason codes</dt><dd className="max-w-40 break-words text-right text-white">{event.reason_codes?.join(", ") || "Unavailable"}</dd></div>
-        <div className="flex justify-between gap-4"><dt>Model source</dt><dd className="max-w-40 break-words text-right text-white">{event.model_source?.join(", ") || "Unavailable"}</dd></div>
-        <div className="flex justify-between gap-4"><dt>Evidence time</dt><dd className="text-right text-white">{formatTime(String(event.timestamp ?? ""))}</dd></div>
-      </dl>
-    </details>
-  );
+function signalTextClass(tone: LiveSignalTone) {
+  if (tone === "live") return "text-emerald-300";
+  if (tone === "attention") return "text-amber-200";
+  if (tone === "danger") return "text-rose-300";
+  if (tone === "offline") return "text-slate-300";
+  return "text-signal-cyan";
 }
 
-function ConciseDataError({ error }: { error: unknown }) {
-  return (
-    <div className="rounded-lg border border-rose-300/25 bg-rose-400/[0.06] p-3 text-sm text-rose-100" role="status">
-      <p>Live data is temporarily unavailable.</p>
-      <details className="mt-2 text-xs text-rose-100/85"><summary className="cursor-pointer font-semibold">Diagnostics</summary><p className="mt-2 break-words">{getErrorMessage(error)}</p></details>
-    </div>
-  );
+function signalBadgeClass(tone: LiveSignalTone) {
+  if (tone === "live") return "border-emerald-300/35 bg-emerald-400/10 text-emerald-200";
+  if (tone === "attention") return "border-amber-300/35 bg-amber-300/10 text-amber-100";
+  if (tone === "danger") return "border-eose-300/40 bg-rose-400/12 text-rose-200";
+  if (tone === "offline") return "border-slate-300/25 bg-slate-300/8 text-slate-300";
+  return "border-signal-cyan/35 bg-signal-cyan/10 text-signal-cyan";
 }
 
-function filterCurrentDetections(detections: Track[]) {
-  const latestFrame = Math.max(...detections.map((detection) => detection.frame_number ?? detection.frame_id ?? 0), 0);
-  if (!latestFrame) return detections.slice(0, 60);
-  return detections.filter((detection) => (detection.frame_number ?? detection.frame_id ?? latestFrame) >= latestFrame - 1).slice(0, 80);
+function observedAtMilliseconds(detection: Track) {
+  const rawValue = detection.last_seen;
+  if (!rawValue) return undefined;
+  const normalized = /(?:Z|[+-]\d\d:\d\d)$/.test(rawValue) ? rawValue : `${rawValue}Z`;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function filterCurrentDetections(detections: Track[], now = Date.now(), maxAgeMs = 5_000) {
+  const freshDetections = detections.filter((detection) => {
+    const observedAt = observedAtMilliseconds(detection);
+    return observedAt === undefined || now - observedAt <= maxAgeMs;
+  });
+  const latestFrame = Math.max(...freshDetections.map((detection) => detection.frame_number ?? detection.frame_id ?? 0), 0);
+  const currentFrame = latestFrame
+    ? freshDetections.filter((detection) => (detection.frame_number ?? detection.frame_id ?? latestFrame) === latestFrame)
+    : freshDetections;
+  const uniqueTracks = new globalThis.Map<string, Track>();
+
+  currentFrame.forEach((detection, index) => {
+    const bbox = Array.isArray(detection.bbox) ? detection.bbox.join(",") : "no-bbox";
+    const identity = detection.track_id
+      ? `track:${detection.track_id}`
+      : `detection:${className(detection)}:${bbox}:${index}`;
+    uniqueTracks.set(identity, detection);
+  });
+
+  return Array.from(uniqueTracks.values()).slice(0, 80);
 }
 
 function buildSummary(detections: Track[]) {
@@ -743,6 +805,21 @@ function cameraOperatorStatus(
   return { tone: "live" as const, label: "Live monitoring", badge: "Live", detail: "Live camera data is available." };
 }
 
+function cameraConnectionSignal(camera: Camera, socketState: SocketState, hasLivePreview: boolean): { label: string; tone: LiveSignalTone } {
+  if (["offline", "error", "stopped"].includes(camera.runtime.status)) return { label: "Offline", tone: "offline" };
+  if (camera.runtime.status === "reconnecting" || socketState === "reconnecting") return { label: "Reconnecting", tone: "attention" };
+  if (hasLivePreview || (camera.runtime.status === "online" && camera.runtime.running)) return { label: "Online", tone: "live" };
+  if (!camera.runtime.running) return { label: "Stopped", tone: "offline" };
+  return { label: "Connecting", tone: "attention" };
+}
+
+function cameraRiskSignal(riskLevel?: RiskLevel): { label: string; tone: LiveSignalTone } {
+  if (riskLevel === "CRITICAL" || riskLevel === "HIGH") return { label: "High risk", tone: "danger" };
+  if (riskLevel === "MEDIUM" || riskLevel === "CANDIDATE_MEDIUM") return { label: "Needs attention", tone: "attention" };
+  if (riskLevel === "LOW") return { label: "Low risk", tone: "live" };
+  return { label: "Clear", tone: "cyan" };
+}
+
 function activityStatus(event: RiskEvent) {
   const level = String(event.risk_level ?? event.severity ?? event.level ?? "").toUpperCase();
   const object = friendlyObjectName(event.object_class ?? event.object_type ?? event.class_name);
@@ -763,7 +840,7 @@ function friendlyObjectName(value?: string) {
   return null;
 }
 
-function overlayGeometry(image: HTMLImageElement, renderedWidth: number, renderedHeight: number): OverlayGeometry | null {
+function overlayGeometry(image: { naturalWidth: number; naturalHeight: number }, renderedWidth: number, renderedHeight: number): OverlayGeometry | null {
   const sourceWidth = image.naturalWidth;
   const sourceHeight = image.naturalHeight;
   if (!sourceWidth || !sourceHeight || !renderedWidth || !renderedHeight) return null;
@@ -885,13 +962,40 @@ function drawDetection(
   const label = overlayLabel(detection);
 
   context.save();
-  context.lineWidth = style.lineWidth;
+  context.lineWidth = Math.max(2, style.lineWidth * 1.5);
   context.strokeStyle = style.stroke;
-  context.fillStyle = style.fill;
-  roundedRect(context, left, top, width, height, 7);
-  context.fill();
-  roundedRect(context, left, top, width, height, 7);
+
+  // Draw tactical corner brackets instead of full box
+  const cornerLength = Math.min(width * 0.2, height * 0.2, 20);
+  context.beginPath();
+  // Top-left
+  context.moveTo(left, top + cornerLength);
+  context.lineTo(left, top);
+  context.lineTo(left + cornerLength, top);
+  // Top-right
+  context.moveTo(right - cornerLength, top);
+  context.lineTo(right, top);
+  context.lineTo(right, top + cornerLength);
+  // Bottom-right
+  context.moveTo(right, bottom - cornerLength);
+  context.lineTo(right, bottom);
+  context.lineTo(right - cornerLength, bottom);
+  // Bottom-left
+  context.moveTo(left + cornerLength, bottom);
+  context.lineTo(left, bottom);
+  context.lineTo(left, bottom - cornerLength);
+
   context.stroke();
+
+  // Pulse effect for high risk
+  if (style.stroke === "#f0abfc" || style.stroke === "#f59e0b") {
+     const pulse = (Date.now() % 2000) / 2000;
+     context.globalAlpha = (1 - pulse) * 0.5;
+     context.lineWidth = context.lineWidth * (1 + pulse * 2);
+     context.stroke();
+  }
+  context.globalAlpha = 1.0;
+
 
   context.font = "12px Inter, system-ui, sans-serif";
   const labelWidth = Math.min(context.measureText(label).width + 16, Math.max(width, 72));
@@ -973,11 +1077,7 @@ function className(detection: Track) {
   return String(detection.class_name ?? "unknown").toLowerCase();
 }
 
-function eventKey(event: RiskEvent, index: number) {
-  return String(event.event_id ?? event.id ?? `${event.timestamp ?? "event"}-${event.track_id ?? index}`);
-}
-
-/** Keep the camera review queue readable without hiding high-priority evidence. */
+/** Keep the latest camera signal concise while retaining high-priority evidence. */
 function buildRecentActivity(events: RiskEvent[]) {
   const seenRoutineObject = new Set<string>();
   return events
@@ -1026,13 +1126,6 @@ function cameraOperatorName(camera: Camera) {
   return cleanReference ? `Camera ${cleanReference}` : "Camera unavailable";
 }
 
-function cameraOperatorSubtitle(camera: Camera, badge: string) {
-  if (badge === "Offline") return "Camera offline";
-  if (badge === "Unavailable") return "Information unavailable";
-  if (["connecting", "reconnecting"].includes(camera.runtime.status) || badge === "Connecting") return "Live image delayed";
-  return "Live camera";
-}
-
 function previewMessage(camera: Camera) {
   if (!camera.runtime.running) return "Start this camera to view live activity.";
   return "Waiting for the first camera frame.";
@@ -1046,4 +1139,4 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
-export const cameraCommandCenterInternals = { buildRecentActivity };
+export const cameraCommandCenterInternals = { buildRecentActivity, filterCurrentDetections };

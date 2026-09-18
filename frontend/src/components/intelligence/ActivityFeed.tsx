@@ -29,7 +29,7 @@ export default function ActivityFeed({ items, emptyMessage }: ActivityFeedProps)
   }
 
   return (
-    <div className="custom-scrollbar flex max-h-[280px] flex-col gap-1.5 overflow-y-auto pr-1" aria-label="Recent evidence">
+    <div className="custom-scrollbar flex max-h-[280px] flex-col gap-1.5 overflow-y-auto pe-1" aria-label="Recent evidence">
       <AnimatePresence initial={false}>
         {items.slice(0, 8).map((item) => {
           const config = severityConfig[item.severity];

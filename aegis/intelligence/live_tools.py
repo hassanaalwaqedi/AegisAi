@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from aegis.intelligence.context_schemas import Availability, IntelligenceContext
+from aegis.intelligence.event_access import load_persisted_event_records, merge_event_records
 from aegis.intelligence.live_schemas import (
     LiveCitation,
     LiveToolResult,
@@ -60,6 +61,7 @@ class LiveToolRegistry:
         "get_pipeline_health",
         "get_official_system_knowledge",
         "open_authorised_evidence",
+        "project_operator_result",
     }
 
     def __init__(
@@ -77,6 +79,8 @@ class LiveToolRegistry:
         self._context_getter = context_getter or self._default_context
         self._audit_sink = audit_sink or self._log_audit
         self._ephemeral_evidence: Dict[str, LiveCitation] = {}
+        from aegis.intelligence.operator_scene import OperatorSceneContext
+        self.scene_context = OperatorSceneContext()
 
     @staticmethod
     def _default_context() -> IntelligenceContext:
@@ -88,6 +92,11 @@ class LiveToolRegistry:
     def declarations() -> List[Dict[str, Any]]:
         """Provider-neutral Gemini function declarations for the strict allowlist."""
         return [
+            {
+                "name": "project_operator_result",
+                "description": "Present real cameras, events, risks, evidence, tracks, or system status inside the persistent Intelligence scene. Use for show/open/find/track commands and follow-ups. Pass the user's complete original request verbatim, including ordinal references such as 'the second one'; the server resolves current scene selection. Summarize only the returned answer and records. This tool does not navigate or mutate operational state.",
+                "parameters": {"type": "OBJECT", "properties": {"message": {"type": "STRING", "minLength": 2, "maxLength": 1000}}, "required": ["message"]},
+            },
             {
                 "name": "get_intelligence_context",
                 "description": "Get the current source-fresh Aegis operational context before answering broad health or status questions.",
@@ -173,6 +182,18 @@ class LiveToolRegistry:
         )
         self._audit_sink(audit)
         return result
+
+    def _project_operator_result(self, arguments: Dict[str, Any]) -> LiveToolResult:
+        from aegis.intelligence.operator_scene import execute_scene_command, OperatorSceneContext
+        message = str(arguments.get("message", ""))[:1000]
+        execution = execute_scene_command(message, self.scene_context)
+        data = execution.model_dump(mode="json")
+        rows = next((execution.result[key] for key in ("events", "evidence", "tracks", "cameras") if isinstance(execution.result.get(key), list)), [])
+        if execution.result.get("camera"):
+            rows = [execution.result["camera"]]
+        ids = [str(row.get("event_id") or row.get("track_id") or row.get("camera_id") or row.get("id") or "") for row in rows if isinstance(row, dict)]
+        self.scene_context = OperatorSceneContext(panel=execution.panel, query=message[:500], ordered_ids=ids[:50], selected_id=ids[0] if ids else None)
+        return LiveToolResult(tool="project_operator_result", availability=Availability.UNAVAILABLE if execution.error else Availability.LIVE, observed_at=_utc_now(), data={"projection": data})
 
     def _context(self) -> IntelligenceContext:
         return self._context_getter()
@@ -421,7 +442,17 @@ class LiveToolRegistry:
             engine = getattr(get_state(), "semantic_query_engine", None)
             if engine is None:
                 raise RuntimeError("semantic query engine is not initialized")
-            execution = engine.search(query)
+            state = get_state()
+            try:
+                durable_events = load_persisted_event_records(limit=100)
+            except Exception:
+                durable_events = []
+            execution = engine.search(
+                prompt=query,
+                tracks=state.get_tracks(),
+                events=merge_event_records(durable_events, state.get_events(limit=100)),
+                statistics=state.get_statistics(),
+            )
             raw_results = getattr(execution, "results", execution)
             if not isinstance(raw_results, list):
                 raise TypeError("semantic engine returned an invalid result payload")

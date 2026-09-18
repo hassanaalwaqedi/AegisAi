@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from aegis.ai.language import ResponseLanguage
+
 
 class Intent(str, Enum):
     """Classified user intent."""
@@ -59,12 +61,45 @@ class ChatResponse(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     latency_ms: float = 0.0
     error: Optional[str] = None
+    response_language: ResponseLanguage = ResponseLanguage.ENGLISH
 
 
 class VoiceRequest(BaseModel):
     """Voice transcription request."""
     audio_base64: Optional[str] = None
     text: Optional[str] = None  # Pre-transcribed text
+
+
+class OperatorCommandRequest(BaseModel):
+    """A command executed by the Intelligence operator against real Aegis services."""
+
+    message: str = Field(..., min_length=2, max_length=1000)
+    previous_intent: Optional[str] = Field(default=None, max_length=64)
+    previous_query: Optional[str] = Field(default=None, max_length=500)
+    previous_evidence_id: Optional[str] = Field(default=None, max_length=128)
+    selected_camera_id: Optional[str] = Field(default=None, max_length=80)
+    selected_track_id: Optional[str] = Field(default=None, max_length=128)
+
+
+class OperatorTraceStep(BaseModel):
+    key: str
+    label: str
+    status: str = "completed"
+
+
+class OperatorExecutionResponse(BaseModel):
+    """Typed, evidence-backed command result for the Intelligence workspace."""
+
+    action: str
+    intent: Intent
+    answer: str
+    panel: str
+    target: Optional[str] = None
+    result: Dict[str, Any] = Field(default_factory=dict)
+    sources: List[SourceReference] = Field(default_factory=list)
+    trace: List[OperatorTraceStep] = Field(default_factory=list)
+    response_language: ResponseLanguage = ResponseLanguage.ENGLISH
+    error: Optional[str] = None
 
 
 class SystemContext(BaseModel):

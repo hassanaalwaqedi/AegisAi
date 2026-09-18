@@ -41,8 +41,8 @@ export function BrowserWebcamCapture({ camera }: { camera?: Camera }) {
         await videoRef.current.play();
       }
       setCapturing(true);
-    } catch (error) {
-      setPermissionError(error instanceof Error ? error.message : "Browser camera permission was denied.");
+    } catch {
+      setPermissionError("Camera access was not allowed. Check the browser permission and try again.");
     }
   }
 
@@ -128,7 +128,7 @@ export function BrowserWebcamCapture({ camera }: { camera?: Camera }) {
 
     const drawableDetections = detections.filter((detection) => Array.isArray(detection.bbox));
     if (detections.length > 0 && drawableDetections.length === 0) {
-      setOverlayMessage("Backend does not return bbox for overlay yet.");
+      setOverlayMessage("Activity outlines are unavailable for this image.");
       return;
     }
     setOverlayMessage("");
@@ -146,8 +146,8 @@ export function BrowserWebcamCapture({ camera }: { camera?: Camera }) {
     <Card>
       <CardHeader>
         <div>
-          <CardTitle>Browser Webcam Ingestion</CardTitle>
-          <CardDescription>Frames are sent to `/camera/browser-frame` for the backend detection pipeline.</CardDescription>
+          <CardTitle>Browser Camera</CardTitle>
+          <CardDescription>Use this camera to monitor activity from this browser.</CardDescription>
         </div>
       </CardHeader>
 
@@ -157,7 +157,7 @@ export function BrowserWebcamCapture({ camera }: { camera?: Camera }) {
           <canvas ref={overlayCanvasRef} className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden />
           <canvas ref={canvasRef} className="hidden" />
           {overlayMessage ? (
-            <p className="absolute bottom-3 left-3 right-3 rounded-md border border-amber-300/25 bg-command-950/85 p-2 text-xs text-amber-100">
+            <p className="absolute bottom-3 start-3 end-3 rounded-md border border-amber-300/25 bg-command-950/85 p-2 text-xs text-amber-100">
               {overlayMessage}
             </p>
           ) : null}
@@ -170,20 +170,20 @@ export function BrowserWebcamCapture({ camera }: { camera?: Camera }) {
           </Button>
 
           <div className="rounded-md border border-white/10 bg-white/[0.035] p-3 text-sm text-slate-300">
-            <p>Backend frames sent: {camera.runtime.frames_received ?? 0}</p>
+            <p>Images reviewed: {camera.runtime.frames_received ?? 0}</p>
             <p className="mt-1">Last detection count: {browserFrame.data?.detections.length ?? 0}</p>
             {browserFrame.isPending ? (
               <p className="mt-2 inline-flex items-center gap-2 text-signal-cyan">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                Processing frame
+                Reviewing image
               </p>
             ) : null}
           </div>
         </div>
       </div>
 
-      {permissionError ? <p className="mt-4 rounded-md border border-rose-400/25 bg-rose-500/[0.08] p-3 text-sm text-rose-100">{permissionError}</p> : null}
-      {browserFrame.error ? <p className="mt-4 rounded-md border border-rose-400/25 bg-rose-500/[0.08] p-3 text-sm text-rose-100">{getErrorMessage(browserFrame.error)}</p> : null}
+      {permissionError ? <p className="mt-4 rounded-md border border-eose-400/25 bg-rose-500/[0.08] p-3 text-sm text-rose-100">{permissionError}</p> : null}
+      {browserFrame.error ? <p className="mt-4 rounded-md border border-eose-400/25 bg-rose-500/[0.08] p-3 text-sm text-rose-100">{getErrorMessage(browserFrame.error)}</p> : null}
     </Card>
   );
 }

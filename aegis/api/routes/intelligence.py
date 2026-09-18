@@ -5,7 +5,7 @@ Production endpoints for NLQ, personalization, and analytics.
 Works without database if unavailable.
 """
 
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, HTTPException, status
 from pydantic import BaseModel
 from typing import Optional
 import logging
@@ -13,6 +13,17 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/intelligence", tags=["Intelligence"])
+
+
+def _unavailable(feature: str) -> None:
+    """Never substitute fabricated intelligence when a verified source is absent."""
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "code": "verified_data_unavailable",
+            "message": f"{feature} is disabled because it has no verified persisted data source.",
+        },
+    )
 
 
 # Request/Response Models
@@ -46,31 +57,16 @@ class AnalyticsEventRequest(BaseModel):
 
 @router.post("/nlq", response_model=NLQResponse)
 async def process_nlq(request: NLQRequest):
-    """Process a natural language query using OpenAI."""
-    try:
-        from aegis.intelligence.nlq import NLQEngine
-        engine = NLQEngine()
-        result = engine.process(request.query)
-        return NLQResponse(
-            query=result.query,
-            query_type=result.query_type.value,
-            answer=result.answer,
-            confidence=result.confidence,
-        )
-    except Exception as e:
-        logger.error(f"NLQ error: {e}")
-        return NLQResponse(
-            query=request.query,
-            query_type="error",
-            answer=f"Unable to process query: {str(e)}",
-            confidence=0.0,
-        )
+    """Legacy NLQ is disabled until it has verified data sources."""
+    del request
+    _unavailable("Legacy intelligence NLQ")
 
 
 @router.get("/nlq/history")
 async def get_nlq_history(limit: int = 10):
     """Get recent NLQ query history."""
-    return {"history": [], "message": "History requires database connection"}
+    del limit
+    _unavailable("Legacy intelligence NLQ history")
 
 
 @router.post("/personalization")
@@ -94,35 +90,24 @@ async def get_personalization(request: PersonalizationRequest):
         return result.to_dict()
     except Exception as e:
         logger.error(f"Personalization error: {e}")
-        return {
-            "ui_variant": "default",
-            "content_strategy": "educational",
-            "feature_flags": {},
-            "recommendations": [],
-            "confidence": 0.0,
-            "error": str(e),
-        }
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Personalization is unavailable because its verified data source failed.",
+        ) from e
 
 
 @router.post("/analytics/event")
 async def track_analytics_event(request: AnalyticsEventRequest):
     """Track a behavioral analytics event."""
-    return {
-        "status": "received",
-        "session_id": request.session_id,
-        "event_type": request.event_type,
-        "message": "Event tracking requires database connection"
-    }
+    del request
+    _unavailable("Legacy behavioral analytics")
 
 
 @router.get("/analytics/session/{session_id}")
 async def get_session_analytics(session_id: str):
     """Get analytics for a specific session."""
-    return {
-        "session_id": session_id,
-        "status": "requires_database",
-        "message": "Session analytics requires database connection"
-    }
+    del session_id
+    _unavailable("Legacy behavioral analytics")
 
 
 @router.post("/privacy/sanitize")
@@ -141,10 +126,14 @@ async def sanitize_data(data: dict = Body(...)):
         return {"sanitized": sanitized}
     except Exception as e:
         logger.error(f"Sanitize error: {e}")
-        return {"error": str(e), "sanitized": {}}
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PII sanitization is temporarily unavailable.",
+        ) from e
 
 
 @router.get("/privacy/audit")
 async def get_privacy_audit(limit: int = 50):
     """Get PII access audit log."""
-    return {"audit_log": [], "message": "Audit log requires database connection"}
+    del limit
+    _unavailable("Privacy audit history")

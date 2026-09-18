@@ -22,6 +22,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from fastapi import WebSocket, WebSocketDisconnect
 
 from aegis.api.security import get_allowed_origins
+from aegis.ai.language import ResponseLanguage, detect_response_language, live_turn_with_language
 from aegis.intelligence.context_schemas import Availability, IntelligenceContext
 from aegis.intelligence.live_prompt import AEGIS_LIVE_SYSTEM_INSTRUCTION
 from aegis.intelligence.live_schemas import (
@@ -143,6 +144,9 @@ class ManagedLiveSession:
     audible_alert: Optional["VerifiedAudibleAlert"] = None
     connected: bool = False
     closed_at: Optional[datetime] = None
+    # The latest detected operator language is kept only for this short-lived
+    # session; it is never persisted alongside audio or transcript content.
+    response_language: ResponseLanguage = ResponseLanguage.ENGLISH
     transcripts: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -217,8 +221,6 @@ class LiveSessionManager:
         unverified, acknowledged, missing, and unavailable records are silent.
         """
         context = self._context()
-        if context.overall.status != Availability.LIVE:
-            raise LiveCapabilityError("Audible alerts are unavailable because Intelligence context is not live.")
 
         record: Any | None = next(
             (
@@ -242,9 +244,9 @@ class LiveSessionManager:
         camera_id = str(getattr(evidence, "camera_id", "") or "").strip()
         location = f" near {camera_id}" if camera_id else ""
         if level == "CRITICAL":
-            text = f"Critical attention required. Operator review needed immediately{location}."
+            text = f"Critical risk event detected{location}. Evidence has been saved. Immediate operator review is required."
         else:
-            text = f"High priority alert. Operator review recommended{location}."
+            text = f"High-risk event detected{location}. Evidence has been saved. Operator review is required."
         return VerifiedAudibleAlert(alert_id=alert_id, level=level, text=text)
 
     async def create(self, operator_id: str, *, audible_alert_id: Optional[str] = None) -> LiveSessionResponse:
@@ -499,6 +501,9 @@ async def _bridge_gemini_session(
     live_config: Dict[str, Any] = {
         "response_modalities": ["AUDIO"],
         "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": voice}}},
+        # Gemini Live selects native speech language from each turn. It does
+        # not accept an explicit language-code field for native audio, so the
+        # response-language instruction is attached to every text turn below.
         "system_instruction": AEGIS_LIVE_SYSTEM_INSTRUCTION,
         "input_audio_transcription": {},
         "output_audio_transcription": {},
@@ -528,7 +533,15 @@ async def _bridge_gemini_session(
             except Exception:
                 await emit(ServerVoiceEnvelope(type="error", code="INVALID_VOICE_ENVELOPE", message="The browser sent an invalid voice message.", correlation_id=session.correlation_id))
                 continue
-            if event.type == "ping":
+            if event.type == "scene_context":
+                from aegis.intelligence.operator_scene import OperatorSceneContext
+                try:
+                    if not event.data or len(event.data) > 12000:
+                        raise ValueError("Invalid scene context size")
+                    registry.scene_context = OperatorSceneContext.model_validate_json(event.data)
+                except ValueError:
+                    await emit(ServerVoiceEnvelope(type="error", code="INVALID_SCENE_CONTEXT", message="Scene context could not be read.", correlation_id=session.correlation_id))
+            elif event.type == "ping":
                 await emit(ServerVoiceEnvelope(type="pong", correlation_id=session.correlation_id))
             elif event.type == "stop":
                 stopped.set()
@@ -546,10 +559,13 @@ async def _bridge_gemini_session(
                 if not event.data or len(event.data) > 2_000:
                     await emit(ServerVoiceEnvelope(type="error", code="INVALID_TEXT_INPUT", message="Voice text input is missing or too large.", correlation_id=session.correlation_id))
                     continue
+                session.response_language = detect_response_language(event.data)
                 if voice_session is not None:
                     voice_session.begin_turn()
                     await voice_session.emit_state(VoiceState.THINKING)
-                await gemini_session.send_realtime_input(text=event.data)
+                await gemini_session.send_realtime_input(
+                    text=live_turn_with_language(event.data, session.response_language)
+                )
             elif event.type == "audio":
                 if not event.data:
                     continue
@@ -577,6 +593,10 @@ async def _bridge_gemini_session(
             input_transcription = getattr(server_content, "input_transcription", None)
             if input_transcription and getattr(input_transcription, "text", None):
                 text = str(input_transcription.text)
+                # For direct PCM clients Gemini detects the spoken language.
+                # The system instruction mirrors it; retaining it here keeps
+                # this session's language state truthful for the next turn.
+                session.response_language = detect_response_language(text)
                 manager.append_transcript(session, "operator", text, True)
                 await emit(ServerVoiceEnvelope(type="transcript", speaker="operator", text=text, is_final=True, turn_id=voice_session.active_turn_id if voice_session else None, correlation_id=session.correlation_id))
             interim = getattr(server_content, "interim_input_transcription", None)
@@ -617,7 +637,7 @@ async def _bridge_gemini_session(
                     voice_session.begin_turn()
                     await emit(ServerVoiceEnvelope(type="tool_activity", tool=name, tool_status="calling", turn_id=voice_session.active_turn_id, correlation_id=session.correlation_id))
                 try:
-                    result = registry.execute(name, dict(arguments))
+                    result = await asyncio.to_thread(registry.execute, name, dict(arguments))
                 except ToolNotAllowedError:
                     result = None
                     await emit(ServerVoiceEnvelope(type="tool_activity", tool=name, tool_status="failed", turn_id=voice_session.active_turn_id if voice_session else None, correlation_id=session.correlation_id))
@@ -629,6 +649,8 @@ async def _bridge_gemini_session(
                     await emit(ServerVoiceEnvelope(type="citations", citations=result.citations, turn_id=voice_session.active_turn_id if voice_session else None, correlation_id=session.correlation_id))
                 if result.ui_command:
                     await emit(ServerVoiceEnvelope(type="ui_command", ui_command=result.ui_command, turn_id=voice_session.active_turn_id if voice_session else None, correlation_id=session.correlation_id))
+                if name == "project_operator_result" and result.data.get("projection"):
+                    await emit(ServerVoiceEnvelope(type="projection", projection=result.data["projection"], turn_id=voice_session.active_turn_id if voice_session else None, correlation_id=session.correlation_id))
                 await emit(ServerVoiceEnvelope(type="tool_activity", tool=name, tool_status="completed", turn_id=voice_session.active_turn_id if voice_session else None, correlation_id=session.correlation_id))
                 responses.append({"name": name, "id": getattr(call, "id", None), "response": {"result": result.model_dump(by_alias=True, mode="json")}})
             await gemini_session.send_tool_response(function_responses=responses)

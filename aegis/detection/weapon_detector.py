@@ -43,6 +43,14 @@ class WeaponDetector:
         self._class_names = dict(self._config.weapon_model_class_names)
         self._internal_class_ids = dict(self._config.weapon_internal_class_ids)
         self._disabled_reason: Optional[str] = None
+        self._class_mapping_validated = False
+
+        missing_internal_ids = set(self._class_names) - set(self._internal_class_ids)
+        if missing_internal_ids:
+            self._disabled_reason = (
+                "Missing internal IDs for custom weapon classes: "
+                + ", ".join(str(class_id) for class_id in sorted(missing_internal_ids))
+            )
 
         logger.info(
             "WeaponDetector initialized with model=%s confidence=%.2f classes=%s",
@@ -58,16 +66,46 @@ class WeaponDetector:
             if not path.exists():
                 raise FileNotFoundError(f"Weapon model was not found: {self._model_path}")
             logger.info("Loading weapon YOLO model: %s", self._model_path)
-            self._model = YOLO(str(path))
-            if hasattr(self._model, "device"):
-                logger.info("Weapon model loaded on device: %s", self._model.device)
+            try:
+                model = YOLO(str(path))
+                self._validate_class_mapping(model)
+                self._model = model
+            except Exception as exc:
+                self._disabled_reason = str(exc)
+                raise
+            if hasattr(model, "device"):
+                logger.info("Weapon model loaded on device: %s", model.device)
         return self._model
+
+    def _validate_class_mapping(self, model: YOLO) -> None:
+        raw_names = getattr(model, "names", None)
+        if isinstance(raw_names, (list, tuple)):
+            actual_names = {index: str(name) for index, name in enumerate(raw_names)}
+        elif isinstance(raw_names, dict):
+            actual_names = {int(index): str(name) for index, name in raw_names.items()}
+        else:
+            raise ValueError("Custom weapon weights do not expose a class-name mapping")
+
+        mismatches = []
+        for class_id, expected_name in self._class_names.items():
+            actual_name = actual_names.get(int(class_id))
+            if actual_name is None or self._normalize_label(actual_name) != self._normalize_label(expected_name):
+                mismatches.append(
+                    f"{class_id}: expected {expected_name!r}, model has {actual_name!r}"
+                )
+        if mismatches:
+            raise ValueError("Custom weapon class mapping mismatch: " + "; ".join(mismatches))
+        self._class_mapping_validated = True
+
+    @staticmethod
+    def _normalize_label(value: str) -> str:
+        return " ".join(str(value).strip().lower().replace("_", " ").split())
 
     def detect(self, frame: np.ndarray, confidence_threshold: Optional[float] = None) -> List[Detection]:
         if self._disabled_reason:
             return []
 
-        conf_thresh = confidence_threshold or self._config.weapon_confidence_threshold
+        conf_thresh = self._config.weapon_confidence_threshold if confidence_threshold is None else confidence_threshold
 
         try:
             results = self.model.predict(
@@ -122,6 +160,11 @@ class WeaponDetector:
         return detections
 
     def get_capabilities(self) -> dict:
+        model_exists = Path(self._model_path).is_file()
+        available = model_exists and self._disabled_reason is None
+        unavailable_reason = self._disabled_reason or (
+            None if model_exists else f"Weapon detector weights are unavailable: {self._model_path}"
+        )
         return {
             "model_name": self._model_path,
             "supported_classes": list(self._class_names.values()),
@@ -129,7 +172,16 @@ class WeaponDetector:
                 name: int(self._internal_class_ids[source_id])
                 for source_id, name in self._class_names.items()
             },
-            "weapon_detection_supported": Path(self._model_path).exists(),
+            "weapon_detection_supported": available,
+            "disabled_reason": unavailable_reason,
+            "class_mapping_validated": self._class_mapping_validated,
+            "validation_status": (
+                "unavailable"
+                if not available
+                else "validated"
+                if self._class_mapping_validated
+                else "configured_not_loaded"
+            ),
         }
 
     def __repr__(self) -> str:

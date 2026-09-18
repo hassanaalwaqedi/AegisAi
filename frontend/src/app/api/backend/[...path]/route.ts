@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -44,6 +45,10 @@ function serverEnvValue(name: "AEGIS_API_URL" | "AEGIS_API_KEY") {
   return process.env[name] || localRootEnvValue(name);
 }
 
+function dashboardProxySignature(apiKey: string) {
+  return createHmac("sha256", apiKey).update("aegis-dashboard-proxy-v1").digest("hex");
+}
+
 function getBackendUrl(path: string[], search: string) {
   const configuredUrl = serverEnvValue("AEGIS_API_URL") || "http://127.0.0.1:8080";
   const base = new URL(configuredUrl);
@@ -66,6 +71,7 @@ async function proxy(request: NextRequest, context: RouteContext) {
   const target = getBackendUrl(path, new URL(request.url).search);
   const headers = new Headers();
   headers.set("X-API-Key", apiKey);
+  headers.set("X-Aegis-Internal-Proxy", dashboardProxySignature(apiKey));
 
   const accept = request.headers.get("accept");
   const contentType = request.headers.get("content-type");

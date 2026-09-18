@@ -14,7 +14,7 @@ import {
   type VoiceState
 } from "@/lib/live-voice";
 
-type CaptureMode = "speech-recognition" | null;
+type CaptureMode = "native-audio" | "speech-recognition" | null;
 
 export type VoiceSessionPhase = "idle" | "listening" | "processing" | "response";
 export type VoiceSessionOutcome = "cancelled" | "timeout" | null;
@@ -81,6 +81,9 @@ export function shouldRestartSpeechRecognition({
 }
 
 type VoiceCallbacks = {
+  sceneContext?: string;
+  onProjection?: (execution: import("@/lib/operator-api").OperatorExecution) => void;
+  onTurnComplete?: () => void;
   onTranscript?: (entry: { speaker: "operator" | "aegis"; text: string; isFinal: boolean }) => void;
   onCitations?: (citations: LiveCitation[]) => void;
   onUiCommand?: (command: SafeUICommand) => void;
@@ -121,6 +124,89 @@ type PcmPlayerCallbacks = {
   onIdle: () => void;
 };
 
+// Gemini PCM arrives as a sequence of small WebSocket frames. Keeping a short
+// lead time lets the browser schedule those frames on one continuous audio
+// timeline instead of exposing normal network jitter as missing syllables.
+const PCM_INITIAL_BUFFER_SECONDS = 0.45;
+const PCM_UNDERRUN_RECOVERY_SECONDS = 0.02;
+const PCM_IDLE_GRACE_MS = 180;
+const PCM_BATCH_WINDOW_MS = 24;
+const PCM_BATCH_TARGET_SECONDS = 0.1;
+const GEMINI_INPUT_SAMPLE_RATE = 16_000;
+const MAX_QUEUED_INPUT_AUDIO_BYTES = GEMINI_INPUT_SAMPLE_RATE * Int16Array.BYTES_PER_ELEMENT * 2;
+
+/** Convert one microphone channel to Gemini Live's signed-16-bit 16 kHz PCM. */
+export function resampleMonoToPcm16(input: Float32Array, inputSampleRate: number, outputSampleRate = GEMINI_INPUT_SAMPLE_RATE) {
+  if (input.length === 0 || inputSampleRate <= 0 || outputSampleRate <= 0) return new ArrayBuffer(0);
+  const ratio = inputSampleRate / outputSampleRate;
+  const output = new Int16Array(Math.max(1, Math.round(input.length / ratio)));
+  for (let index = 0; index < output.length; index += 1) {
+    const start = Math.floor(index * ratio);
+    const end = Math.min(input.length, Math.max(start + 1, Math.floor((index + 1) * ratio)));
+    let total = 0;
+    for (let sample = start; sample < end; sample += 1) total += input[sample] ?? 0;
+    const value = total / Math.max(1, end - start);
+    output[index] = Math.max(-1, Math.min(1, value)) < 0
+      ? Math.round(Math.max(-1, value) * 0x8000)
+      : Math.round(Math.min(1, value) * 0x7fff);
+  }
+  return output.buffer;
+}
+
+/** Coalesces tiny adjacent PCM frames before they reach Web Audio. */
+export class PcmFrameBatcher {
+  constructor(private onBatch: (buffer: ArrayBuffer, sampleRate: number) => void = () => undefined) {}
+
+  private chunks: ArrayBuffer[] = [];
+  private totalBytes = 0;
+  private sampleRate = 0;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  setOnBatch(onBatch: (buffer: ArrayBuffer, sampleRate: number) => void) {
+    this.onBatch = onBatch;
+  }
+
+  enqueue(chunk: ArrayBuffer, sampleRate: number) {
+    if (chunk.byteLength === 0) return;
+    if (this.sampleRate && this.sampleRate !== sampleRate) this.flush();
+    this.sampleRate = sampleRate;
+    this.chunks.push(chunk);
+    this.totalBytes += chunk.byteLength;
+    const queuedSeconds = this.totalBytes / (sampleRate * Int16Array.BYTES_PER_ELEMENT);
+    if (queuedSeconds >= PCM_BATCH_TARGET_SECONDS) {
+      this.flush();
+      return;
+    }
+    if (this.flushTimer === null) this.flushTimer = setTimeout(() => this.flush(), PCM_BATCH_WINDOW_MS);
+  }
+
+  flush() {
+    if (this.flushTimer !== null) clearTimeout(this.flushTimer);
+    this.flushTimer = null;
+    if (this.chunks.length === 0 || !this.sampleRate) return false;
+    const combined = new Uint8Array(this.totalBytes);
+    let offset = 0;
+    for (const chunk of this.chunks) {
+      combined.set(new Uint8Array(chunk), offset);
+      offset += chunk.byteLength;
+    }
+    const sampleRate = this.sampleRate;
+    this.chunks = [];
+    this.totalBytes = 0;
+    this.sampleRate = 0;
+    this.onBatch(combined.buffer, sampleRate);
+    return true;
+  }
+
+  clear() {
+    if (this.flushTimer !== null) clearTimeout(this.flushTimer);
+    this.flushTimer = null;
+    this.chunks = [];
+    this.totalBytes = 0;
+    this.sampleRate = 0;
+  }
+}
+
 /** Queues signed 16-bit mono native Gemini PCM without browser TTS. */
 export class NativePcmPlayer {
   constructor(private readonly callbacks: PcmPlayerCallbacks) {}
@@ -130,9 +216,16 @@ export class NativePcmPlayer {
   private levelFrame = 0;
   private nextStartAt = 0;
   private sources = new Set<AudioBufferSourceNode>();
+  private pendingSchedules = 0;
+  private playbackGeneration = 0;
+  private scheduleTail: Promise<void> = Promise.resolve();
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private hasScheduledAudio = false;
+  private streamBoundaryManaged = false;
+  private streamComplete = false;
 
   get isPlaying() {
-    return this.sources.size > 0;
+    return this.sources.size > 0 || this.pendingSchedules > 0;
   }
 
   async prepare() {
@@ -169,38 +262,122 @@ export class NativePcmPlayer {
     this.callbacks.onLevel(0);
   }
 
-  async playPcm(pcmBuffer: ArrayBuffer, sampleRate: number) {
-    await this.prepare();
-    const context = this.context;
-    if (!context || !this.analyser) throw new Error("Native audio output is not ready.");
-    const samples = pcmToFloat(pcmBuffer);
-    if (samples.length === 0) return false;
-    const buffer = context.createBuffer(1, samples.length, sampleRate);
-    buffer.copyToChannel(samples, 0);
-    const source = context.createBufferSource();
-    source.buffer = buffer;
-    source.connect(this.analyser);
-    source.onended = () => {
-      this.sources.delete(source);
-      if (this.sources.size === 0) {
-        this.stopLevelMonitor();
-        this.callbacks.onIdle();
+  private cancelIdleNotification() {
+    if (this.idleTimer !== null) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+  }
+
+  /** Begin one provider response so a transient underrun cannot look idle. */
+  beginStream() {
+    this.cancelIdleNotification();
+    this.streamBoundaryManaged = true;
+    this.streamComplete = false;
+    if (!this.isPlaying) {
+      this.nextStartAt = 0;
+      this.hasScheduledAudio = false;
+    }
+  }
+
+  /** Mark that all PCM frames for the current provider response arrived. */
+  endStream() {
+    this.streamComplete = true;
+    this.notifyIdleWhenDrained();
+  }
+
+  private notifyIdleWhenDrained() {
+    if (this.sources.size > 0 || this.pendingSchedules > 0 || this.idleTimer !== null) return;
+    if (this.streamBoundaryManaged && !this.streamComplete) return;
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (this.sources.size > 0 || this.pendingSchedules > 0) return;
+      if (this.streamBoundaryManaged && !this.streamComplete) return;
+      this.nextStartAt = 0;
+      this.hasScheduledAudio = false;
+      this.streamBoundaryManaged = false;
+      this.streamComplete = false;
+      this.stopLevelMonitor();
+      this.callbacks.onIdle();
+    }, PCM_IDLE_GRACE_MS);
+  }
+
+  playPcm(pcmBuffer: ArrayBuffer, sampleRate: number) {
+    if (pcmBuffer.byteLength % Int16Array.BYTES_PER_ELEMENT !== 0) {
+      return Promise.reject(new Error("Native PCM audio frame is not 16-bit aligned."));
+    }
+    const generation = this.playbackGeneration;
+    this.pendingSchedules += 1;
+    this.cancelIdleNotification();
+
+    let resolvePlayback!: (played: boolean) => void;
+    let rejectPlayback!: (reason?: unknown) => void;
+    const result = new Promise<boolean>((resolve, reject) => {
+      resolvePlayback = resolve;
+      rejectPlayback = reject;
+    });
+
+    const schedule = async () => {
+      try {
+        await this.prepare();
+        if (generation !== this.playbackGeneration) {
+          resolvePlayback(false);
+          return;
+        }
+        const context = this.context;
+        if (!context || !this.analyser) throw new Error("Native audio output is not ready.");
+        const samples = pcmToFloat(pcmBuffer);
+        if (samples.length === 0) {
+          resolvePlayback(false);
+          return;
+        }
+        const buffer = context.createBuffer(1, samples.length, sampleRate);
+        buffer.copyToChannel(samples, 0);
+        const source = context.createBufferSource();
+        source.buffer = buffer;
+        source.connect(this.analyser);
+        source.onended = () => {
+          this.sources.delete(source);
+          this.notifyIdleWhenDrained();
+        };
+
+        // Once playback has a future timeline, every chunk starts exactly at
+        // the preceding chunk's end. A genuine underrun gets only a small
+        // scheduling lead; applying the full initial buffer again makes a
+        // tiny network gap sound like a conspicuous cut.
+        const startAt = this.nextStartAt > context.currentTime
+          ? this.nextStartAt
+          : context.currentTime + (this.hasScheduledAudio ? PCM_UNDERRUN_RECOVERY_SECONDS : PCM_INITIAL_BUFFER_SECONDS);
+        source.start(startAt);
+        this.nextStartAt = startAt + buffer.duration;
+        this.hasScheduledAudio = true;
+        const wasIdle = this.sources.size === 0;
+        this.sources.add(source);
+        this.startLevelMonitor();
+        if (wasIdle) this.callbacks.onStarted();
+        resolvePlayback(true);
+      } catch (error) {
+        rejectPlayback(error);
+      } finally {
+        if (generation === this.playbackGeneration) {
+          this.pendingSchedules = Math.max(0, this.pendingSchedules - 1);
+          this.notifyIdleWhenDrained();
+        }
       }
     };
-    const startAt = Math.max(context.currentTime + 0.015, this.nextStartAt);
-    source.start(startAt);
-    this.nextStartAt = startAt + buffer.duration;
-    const wasIdle = this.sources.size === 0;
-    this.sources.add(source);
-    this.startLevelMonitor();
-    if (wasIdle) this.callbacks.onStarted();
-    return true;
+
+    // Serializing schedule work preserves WebSocket frame order even when
+    // AudioContext.resume() or Blob conversion resolves asynchronously.
+    this.scheduleTail = this.scheduleTail.then(schedule, schedule);
+    return result;
   }
 
   stop() {
-    const wasPlaying = this.sources.size > 0;
+    const wasPlaying = this.isPlaying;
+    this.playbackGeneration += 1;
+    this.pendingSchedules = 0;
+    this.cancelIdleNotification();
     this.sources.forEach((source) => {
       try {
+        source.onended = null;
         source.stop();
       } catch {
         // A source that already ended has no work left to do.
@@ -208,6 +385,9 @@ export class NativePcmPlayer {
     });
     this.sources.clear();
     this.nextStartAt = 0;
+    this.hasScheduledAudio = false;
+    this.streamBoundaryManaged = false;
+    this.streamComplete = false;
     this.stopLevelMonitor();
     if (wasPlaying) this.callbacks.onIdle();
     return wasPlaying;
@@ -236,9 +416,10 @@ export function voiceStateLabel(state: VoiceState) {
 }
 
 /**
- * A short, explicit operator voice turn. Browser speech recognition captures
- * a conversation through the existing authenticated Gemini Live gateway. No
- * microphone is opened until startListening is called from a user gesture,
+ * A short, explicit operator voice turn. Native 16 kHz microphone PCM is sent
+ * through the authenticated Gemini Live gateway so Gemini can transcribe the
+ * operator's actual language. Browser speech recognition is only a fallback.
+ * No microphone is opened until startListening is called from a user gesture,
  * and every exit path releases it.
  */
 export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
@@ -265,6 +446,14 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
   const audibleAlertOutputSampleRateRef = useRef(24_000);
   const audibleAlertDrainTimerRef = useRef<number | null>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const inputAudioContextRef = useRef<AudioContext | null>(null);
+  const inputMediaStreamRef = useRef<MediaStream | null>(null);
+  const inputSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const inputProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const inputSinkRef = useRef<GainNode | null>(null);
+  const nativeInputActiveRef = useRef(false);
+  const pendingInputAudioRef = useRef<ArrayBuffer[]>([]);
+  const pendingInputAudioBytesRef = useRef(0);
   const beginSpeechRecognitionRef = useRef<(epoch: number) => void>(() => undefined);
   const recognitionRestartTimerRef = useRef<number | null>(null);
   const recognitionStartingRef = useRef(false);
@@ -284,9 +473,18 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
   const nativeAudioPlaybackStartedRef = useRef(false);
   const outputSampleRateRef = useRef(24_000);
   const manuallyStoppedRef = useRef(false);
+  // Audio analysers sample at the display refresh rate. Keep the raw value in
+  // a ref and publish only meaningful changes so a playback meter cannot
+  // trigger a React render loop while native audio is playing.
+  const playbackLevelRef = useRef(0);
   const finishSessionRef = useRef<(outcome?: VoiceSessionOutcome, message?: string | null) => void>(() => undefined);
   const resumeListeningRef = useRef<() => void>(() => undefined);
-  const onPlayerLevel = useCallback((level: number) => setPlaybackLevel(level), []);
+  const onPlayerLevel = useCallback((level: number) => {
+    const next = Math.round(Math.min(1, Math.max(0, level)) * 20) / 20;
+    if (Math.abs(playbackLevelRef.current - next) < 0.05) return;
+    playbackLevelRef.current = next;
+    setPlaybackLevel(next);
+  }, []);
   const setPhase = useCallback((phase: VoiceSessionPhase) => {
     sessionPhaseRef.current = phase;
     setSessionPhase(phase);
@@ -308,7 +506,30 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
       onStarted: onPlayerStarted,
       onIdle: onPlayerIdle,
     }));
+  // Risk-alert audio has an independent lifecycle. Sharing this player with
+  // conversational output allowed alert cleanup to stop an Aegis response.
+  const [audibleAlertPlayer] = useState(() => new NativePcmPlayer({
+    onLevel: () => undefined,
+    onStarted: () => undefined,
+    onIdle: () => undefined,
+  }));
+  const [conversationAudioBatcher] = useState(() => new PcmFrameBatcher());
   const callbacksRef = useRef(callbacks);
+  useEffect(() => {
+    if (callbacks.sceneContext && gatewayReadyRef.current && socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ version: "1.0", type: "scene_context", data: callbacks.sceneContext }));
+    }
+  }, [callbacks.sceneContext]);
+
+  useEffect(() => {
+    conversationAudioBatcher.setOnBatch((chunk, sampleRate) => {
+      if (!sessionActiveRef.current) return;
+      void player.playPcm(chunk, sampleRate).catch(() => {
+        finishSessionRef.current(null, "Aegis native audio playback is unavailable in this browser.");
+      });
+    });
+    return () => conversationAudioBatcher.clear();
+  }, [conversationAudioBatcher, player]);
 
   useEffect(() => {
     callbacksRef.current = callbacks;
@@ -324,7 +545,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     audibleAlertSocketRef.current = null;
     audibleAlertSessionRef.current = null;
     audibleAlertOpeningRef.current = false;
-    if (stopPlayback) player.stop();
+    if (stopPlayback) audibleAlertPlayer.stop();
     if (socket?.readyState === WebSocket.OPEN) socket.send(browserVoiceEnvelope("stop"));
     if (socket) {
       socket.onclose = null;
@@ -332,18 +553,77 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
       socket.close(1000, "audible alert ended");
     }
     if (session) void closeLiveSession(session.sessionId);
-  }, [player]);
+  }, [audibleAlertPlayer]);
+
+  // This callback is passed into useAudibleRiskAlerts, whose effect cleanup
+  // depends on referential stability. A fresh wrapper on every render caused
+  // cleanup to run during playback and repeatedly stop the audio player.
+  const stopAudibleRiskAlert = useCallback(() => {
+    closeAudibleAlert(true);
+  }, [closeAudibleAlert]);
 
   const send = useCallback((type: "audio" | "text" | "audio_end" | "interrupt" | "stop" | "ping", data?: string, mimeType?: string) => {
     const socket = socketRef.current;
     if (socket?.readyState === WebSocket.OPEN) socket.send(browserVoiceEnvelope(type, data, mimeType));
   }, []);
 
-  const clearSessionTimers = useCallback(() => {
+  const queueOrSendInputAudio = useCallback((pcm: ArrayBuffer) => {
+    if (!sessionActiveRef.current || pcm.byteLength === 0) return;
+    const socket = socketRef.current;
+    if (gatewayReadyRef.current && socket?.readyState === WebSocket.OPEN) {
+      socket.send(browserVoiceEnvelope("audio", pcmBufferToBase64(pcm), `audio/pcm;rate=${GEMINI_INPUT_SAMPLE_RATE}`));
+      return;
+    }
+
+    pendingInputAudioRef.current.push(pcm);
+    pendingInputAudioBytesRef.current += pcm.byteLength;
+    while (pendingInputAudioBytesRef.current > MAX_QUEUED_INPUT_AUDIO_BYTES) {
+      const discarded = pendingInputAudioRef.current.shift();
+      pendingInputAudioBytesRef.current -= discarded?.byteLength ?? 0;
+    }
+  }, []);
+
+  const flushPendingInputAudio = useCallback(() => {
+    const socket = socketRef.current;
+    if (!gatewayReadyRef.current || socket?.readyState !== WebSocket.OPEN || !sessionActiveRef.current) return;
+    for (const pcm of pendingInputAudioRef.current) {
+      socket.send(browserVoiceEnvelope("audio", pcmBufferToBase64(pcm), `audio/pcm;rate=${GEMINI_INPUT_SAMPLE_RATE}`));
+    }
+    pendingInputAudioRef.current = [];
+    pendingInputAudioBytesRef.current = 0;
+  }, []);
+
+  const pauseConversationInactivityTimer = useCallback(() => {
     if (sessionTimerRef.current !== null) window.clearInterval(sessionTimerRef.current);
-    if (recognitionRestartTimerRef.current !== null) window.clearTimeout(recognitionRestartTimerRef.current);
     sessionTimerRef.current = null;
+    setSessionSecondsRemaining(0);
+  }, []);
+
+  const clearSessionTimers = useCallback(() => {
+    pauseConversationInactivityTimer();
+    if (recognitionRestartTimerRef.current !== null) window.clearTimeout(recognitionRestartTimerRef.current);
     recognitionRestartTimerRef.current = null;
+  }, [pauseConversationInactivityTimer]);
+
+  const stopNativeAudioCapture = useCallback(() => {
+    nativeInputActiveRef.current = false;
+    pendingInputAudioRef.current = [];
+    pendingInputAudioBytesRef.current = 0;
+    const processor = inputProcessorRef.current;
+    inputProcessorRef.current = null;
+    if (processor) {
+      processor.onaudioprocess = null;
+      processor.disconnect();
+    }
+    inputSourceRef.current?.disconnect();
+    inputSourceRef.current = null;
+    inputSinkRef.current?.disconnect();
+    inputSinkRef.current = null;
+    inputMediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    inputMediaStreamRef.current = null;
+    const context = inputAudioContextRef.current;
+    inputAudioContextRef.current = null;
+    if (context && context.state !== "closed") void context.close();
   }, []);
 
   const stopRecognition = useCallback(() => {
@@ -366,6 +646,58 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     setWaveformLevel(0);
   }, []);
 
+  const startNativeAudioCapture = useCallback(async (epoch: number) => {
+    if (!sessionActiveRef.current || epoch !== sessionEpochRef.current) return false;
+    if (nativeInputActiveRef.current) return true;
+    if (!navigator.mediaDevices?.getUserMedia || typeof AudioContext === "undefined") return false;
+
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+    } catch {
+      return false;
+    }
+    if (!sessionActiveRef.current || epoch !== sessionEpochRef.current) {
+      stream.getTracks().forEach((track) => track.stop());
+      return false;
+    }
+
+    const context = new AudioContext();
+    const source = context.createMediaStreamSource(stream);
+    // ScriptProcessor is used for broad browser support. It runs only while an
+    // operator actively holds a Live session and sends no audio to Aegis logs
+    // or storage; each PCM chunk is forwarded in memory to Gemini Live.
+    const processor = context.createScriptProcessor(2_048, 1, 1);
+    const silentSink = context.createGain();
+    silentSink.gain.value = 0;
+    processor.onaudioprocess = (event) => {
+      if (!sessionActiveRef.current || epoch !== sessionEpochRef.current || !nativeInputActiveRef.current) return;
+      const pcm = resampleMonoToPcm16(event.inputBuffer.getChannelData(0), context.sampleRate);
+      queueOrSendInputAudio(pcm);
+    };
+    source.connect(processor);
+    processor.connect(silentSink);
+    silentSink.connect(context.destination);
+    inputAudioContextRef.current = context;
+    inputMediaStreamRef.current = stream;
+    inputSourceRef.current = source;
+    inputProcessorRef.current = processor;
+    inputSinkRef.current = silentSink;
+    nativeInputActiveRef.current = true;
+    if (context.state === "suspended") await context.resume();
+    setCaptureMode("native-audio");
+    setIsCapturing(true);
+    setState("listening");
+    return true;
+  }, [queueOrSendInputAudio]);
+
   const finishSession = useCallback((outcome: VoiceSessionOutcome = null, message: string | null = null) => {
     const session = sessionRef.current;
     const socket = socketRef.current;
@@ -381,9 +713,10 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     responseCompleteRef.current = false;
     nativeAudioQueuedRef.current = false;
     nativeAudioPlaybackStartedRef.current = false;
-    audibleAlertPreparedRef.current = false;
+    conversationAudioBatcher.clear();
     closeAudibleAlert(true);
     clearSessionTimers();
+    stopNativeAudioCapture();
     stopRecognition();
     void player.close();
     socketRef.current = null;
@@ -400,7 +733,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     setSessionOutcome(outcome);
     setError(message);
     setState(message && outcome === null ? "error" : "off");
-  }, [clearSessionTimers, closeAudibleAlert, player, setPhase, stopRecognition]);
+  }, [clearSessionTimers, closeAudibleAlert, conversationAudioBatcher, player, setPhase, stopNativeAudioCapture, stopRecognition]);
 
   useEffect(() => {
     finishSessionRef.current = finishSession;
@@ -414,11 +747,12 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     responseCompleteRef.current = false;
     nativeAudioQueuedRef.current = false;
     nativeAudioPlaybackStartedRef.current = false;
+    player.beginStream();
     socket.send(browserVoiceEnvelope("text", text));
-  }, []);
+  }, [player]);
 
   const resetConversationInactivityTimer = useCallback((epoch: number) => {
-    if (sessionTimerRef.current !== null) window.clearInterval(sessionTimerRef.current);
+    pauseConversationInactivityTimer();
     const deadline = Date.now() + VOICE_CONVERSATION_IDLE_TIMEOUT_MS;
     sessionDeadlineRef.current = deadline;
     setSessionSecondsRemaining(Math.ceil(VOICE_CONVERSATION_IDLE_TIMEOUT_MS / 1_000));
@@ -428,7 +762,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
       setSessionSecondsRemaining(Math.ceil(remaining / 1_000));
       if (remaining === 0) finishSessionRef.current("timeout", "No request was received for 60 seconds. Listening stopped safely.");
     }, 250);
-  }, []);
+  }, [pauseConversationInactivityTimer]);
 
   const submitTranscript = useCallback((text: string) => {
     const trimmed = text.trim();
@@ -436,13 +770,16 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     submittedTranscriptRef.current = true;
     lastSubmittedTranscriptRef.current = trimmed;
     pendingTranscriptRef.current = trimmed;
-    resetConversationInactivityTimer(sessionEpochRef.current);
+    // Inactivity means waiting for the operator, not time spent generating or
+    // speaking an answer. Pausing here prevents long answers being cut off by
+    // the listening timeout; resumeListening starts a fresh 60-second window.
+    pauseConversationInactivityTimer();
     stopRecognition();
     setPhase("processing");
     setState("thinking");
     callbacksRef.current.onTranscript?.({ speaker: "operator", text: trimmed, isFinal: true });
     flushPendingTranscript();
-  }, [flushPendingTranscript, resetConversationInactivityTimer, setPhase, stopRecognition]);
+  }, [flushPendingTranscript, pauseConversationInactivityTimer, setPhase, stopRecognition]);
 
   const beginSpeechRecognition = useCallback((epoch: number) => {
     if (!sessionActiveRef.current || epoch !== sessionEpochRef.current || recognitionRef.current || recognitionStartingRef.current) return;
@@ -553,9 +890,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
       const queueNativeAudio = (chunk: ArrayBuffer) => {
         if (!sessionActiveRef.current || socketRef.current !== socket) return;
         nativeAudioQueuedRef.current = true;
-        void player.playPcm(chunk, outputSampleRateRef.current).catch(() => {
-          finishSessionRef.current(null, "Aegis native audio playback is unavailable in this browser.");
-        });
+        conversationAudioBatcher.enqueue(chunk, outputSampleRateRef.current);
       };
       if (message.data instanceof ArrayBuffer) {
         queueNativeAudio(message.data);
@@ -585,6 +920,8 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
       if (event.type === "state" && event.state) {
         if (event.state === "ready") {
           gatewayReadyRef.current = true;
+          if (callbacksRef.current.sceneContext) socket.send(JSON.stringify({ version: "1.0", type: "scene_context", data: callbacksRef.current.sceneContext }));
+          flushPendingInputAudio();
           flushPendingTranscript();
         } else if (event.state === "thinking") {
           setPhase("processing");
@@ -597,14 +934,19 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
       }
       if (event.type === "citations" && event.citations) callbacksRef.current.onCitations?.(event.citations);
       if (event.type === "ui_command" && event.uiCommand) callbacksRef.current.onUiCommand?.(event.uiCommand);
+      if (event.type === "projection" && event.projection) callbacksRef.current.onProjection?.(event.projection);
       if (event.type === "tool_activity" && event.tool && event.toolStatus) callbacksRef.current.onToolActivity?.({ tool: event.tool, status: event.toolStatus, turnId: event.turnId });
       if (event.type === "interrupted") {
+        conversationAudioBatcher.clear();
         player.stop();
         responseCompleteRef.current = true;
         resumeListeningRef.current();
       }
       if (event.type === "turn_complete") {
+        callbacksRef.current.onTurnComplete?.();
         responseCompleteRef.current = true;
+        conversationAudioBatcher.flush();
+        player.endStream();
         if (!nativeAudioQueuedRef.current || nativeAudioPlaybackStartedRef.current) {
           if (!player.isPlaying) resumeListeningRef.current();
         }
@@ -619,7 +961,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     socket.onclose = () => {
       if (socketRef.current === socket && !manuallyStoppedRef.current) finishSessionRef.current(null, "The Gemini Live connection closed.");
     };
-  }, [flushPendingTranscript, player, setPhase]);
+  }, [conversationAudioBatcher, flushPendingInputAudio, flushPendingTranscript, player, setPhase]);
 
   /**
    * Prime native Gemini audio from a deliberate opt-in click. This never asks
@@ -629,14 +971,14 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
   const prepareAudibleAlertAudio = useCallback(async () => {
     if (sessionActiveRef.current) return false;
     try {
-      await player.prepare();
+      await audibleAlertPlayer.prepare();
       audibleAlertPreparedRef.current = true;
       return true;
     } catch {
       audibleAlertPreparedRef.current = false;
       return false;
     }
-  }, [player]);
+  }, [audibleAlertPlayer]);
 
   /**
    * Play a HIGH/CRITICAL alert through a separate, output-only Gemini session.
@@ -690,7 +1032,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
 
       const closeWhenDrained = () => {
         if (!turnComplete || !receivedAudio) return;
-        if (!player.isPlaying) {
+        if (!audibleAlertPlayer.isPlaying) {
           settle("spoken");
           return;
         }
@@ -714,12 +1056,17 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
       audibleAlertOutputSampleRateRef.current = session.capabilities.outputSampleRate ?? 24_000;
       audibleAlertOpeningRef.current = false;
       socket.binaryType = "arraybuffer";
+      audibleAlertPlayer.beginStream();
 
       const queueNativeAudio = (chunk: ArrayBuffer) => {
         if (audibleAlertSocketRef.current !== socket) return;
-        void player.playPcm(chunk, audibleAlertOutputSampleRateRef.current)
+        void audibleAlertPlayer.playPcm(chunk, audibleAlertOutputSampleRateRef.current)
           .then((played) => {
             if (!played) return;
+            if (audibleAlertDrainTimerRef.current !== null) {
+              window.clearTimeout(audibleAlertDrainTimerRef.current);
+              audibleAlertDrainTimerRef.current = null;
+            }
             receivedAudio = true;
             // Speaking has started. Keep the socket alive until the Gemini
             // turn and queued PCM have drained, but let the caller record the
@@ -760,6 +1107,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
         }
         if (event.type === "turn_complete") {
           turnComplete = true;
+          audibleAlertPlayer.endStream();
           if (!receivedAudio) settle("unavailable");
           else closeWhenDrained();
         }
@@ -774,6 +1122,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
         // The provider may close immediately after its final PCM chunk.
         // Preserve queued native audio, then release the short-lived record.
         turnComplete = true;
+        audibleAlertPlayer.endStream();
         closeWhenDrained();
       };
       // No alert should leave a socket or a promise open if a provider never
@@ -782,7 +1131,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
         if (!receivedAudio) settle("unavailable", true);
       }, 12_000);
     });
-  }, [closeAudibleAlert, player]);
+  }, [audibleAlertPlayer, closeAudibleAlert]);
 
   const resumeListening = useCallback(() => {
     if (!sessionActiveRef.current || !responseCompleteRef.current) return;
@@ -790,13 +1139,14 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     responseCompleteRef.current = false;
     nativeAudioQueuedRef.current = false;
     nativeAudioPlaybackStartedRef.current = false;
+    conversationAudioBatcher.clear();
     submittedTranscriptRef.current = false;
     lastSubmittedTranscriptRef.current = null;
     setPhase("listening");
     setState("listening");
     resetConversationInactivityTimer(epoch);
-    beginSpeechRecognitionRef.current(epoch);
-  }, [resetConversationInactivityTimer, setPhase]);
+    if (!nativeInputActiveRef.current) beginSpeechRecognitionRef.current(epoch);
+  }, [conversationAudioBatcher, resetConversationInactivityTimer, setPhase]);
 
   useEffect(() => {
     resumeListeningRef.current = resumeListening;
@@ -807,11 +1157,14 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
       finishSession("cancelled", "Listening cancelled.");
       return;
     }
-    if (!browserSpeechRecognitionConstructor()) {
-      setError("Web Speech API is not supported in this browser. Use the typed fallback.");
+    if (!navigator.mediaDevices?.getUserMedia && !browserSpeechRecognitionConstructor()) {
+      setError("Microphone capture is not supported in this browser. Use the typed fallback.");
       setState("error");
       return;
     }
+    // An explicit operator conversation always wins over a background risk
+    // alert. Stop its socket and isolated player before opening the microphone.
+    closeAudibleAlert(true);
     const epoch = sessionEpochRef.current + 1;
     sessionEpochRef.current = epoch;
     sessionActiveRef.current = true;
@@ -824,6 +1177,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     responseCompleteRef.current = false;
     nativeAudioQueuedRef.current = false;
     nativeAudioPlaybackStartedRef.current = false;
+    conversationAudioBatcher.clear();
     setError(null);
     setSessionOutcome(null);
     setPhase("listening");
@@ -832,21 +1186,24 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     // Preparing playback inside this click keeps native Gemini response audio
     // eligible for browser playback without opening the microphone early.
     void player.prepare().catch(() => finishSessionRef.current(null, "The browser could not authorize Aegis audio playback."));
-    beginSpeechRecognition(epoch);
+    void startNativeAudioCapture(epoch).then((started) => {
+      if (!started) beginSpeechRecognition(epoch);
+    });
     void openLiveConnection(epoch);
-  }, [beginSpeechRecognition, finishSession, openLiveConnection, player, resetConversationInactivityTimer, setPhase]);
+  }, [beginSpeechRecognition, closeAudibleAlert, conversationAudioBatcher, finishSession, openLiveConnection, player, resetConversationInactivityTimer, setPhase, startNativeAudioCapture]);
 
   const stop = useCallback(() => {
     if (sessionActiveRef.current || socketRef.current || sessionRef.current) finishSession("cancelled", "Listening cancelled.");
     else {
-      audibleAlertPreparedRef.current = false;
+      conversationAudioBatcher.clear();
       closeAudibleAlert(true);
+      stopNativeAudioCapture();
       stopRecognition();
       void player.close();
       setPhase("idle");
       setState("off");
     }
-  }, [closeAudibleAlert, finishSession, player, setPhase, stopRecognition]);
+  }, [closeAudibleAlert, conversationAudioBatcher, finishSession, player, setPhase, stopNativeAudioCapture, stopRecognition]);
 
   // Kept as a compatibility alias for the existing voice core callers.
   const enableHandsFree = startListening;
@@ -857,12 +1214,15 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     const trimmed = text.trim();
     if (!trimmed) return false;
     if (socketRef.current?.readyState !== WebSocket.OPEN || !gatewayReadyRef.current || !sessionActiveRef.current) return false;
+    conversationAudioBatcher.clear();
     player.stop();
+    player.beginStream();
+    pauseConversationInactivityTimer();
     send("text", trimmed);
     setPhase("processing");
     setState("thinking");
     return true;
-  }, [player, send, setPhase]);
+  }, [conversationAudioBatcher, pauseConversationInactivityTimer, player, send, setPhase]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -872,8 +1232,9 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       stop();
+      void audibleAlertPlayer.close();
     };
-  }, [stop]);
+  }, [audibleAlertPlayer, stop]);
 
   return {
     state,
@@ -893,7 +1254,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     sendTypedFallback,
     prepareAudibleAlertAudio,
     speakAudibleRiskAlert,
-    stopAudibleRiskAlert: () => closeAudibleAlert(true),
+    stopAudibleRiskAlert,
     stop
   };
 }

@@ -52,18 +52,16 @@ class DetectionStage(PipelineStage):
         self._model_load_error: Optional[str] = None
 
     def _get_detector(self):
-        """Lazy-load the YOLO detector."""
+        """Lazy-load the base + optional custom YOLO detector facade."""
         if self._detector is None:
             with self._detector_lock:
                 if self._detector is None:
                     from config import DetectionConfig
-                    from aegis.detection.yolo_detector import YOLODetector
+                    from aegis.detection.multi_model_detector import MultiModelDetector
 
-                    # ``YOLODetector`` accepts the canonical DetectionConfig,
-                    # not individual keyword arguments. Keeping the stage
-                    # configuration explicit ensures the production pipeline
-                    # loads the same weights and threshold it reports.
-                    self._detector = YOLODetector(
+                    # Keep one canonical DetectionConfig so both local model
+                    # wrappers report the same paths and thresholds they use.
+                    self._detector = MultiModelDetector(
                         detection_config=DetectionConfig(
                             model_path=self._model_path,
                             confidence_threshold=self._confidence,
@@ -80,7 +78,13 @@ class DetectionStage(PipelineStage):
         """Load the actual model weights before health is reported as live."""
         try:
             detector = self._get_detector()
-            _ = detector.model
+            _ = detector.person_detector.model
+            custom_capabilities = detector.weapon_detector.get_capabilities()
+            if custom_capabilities["weapon_detection_supported"]:
+                try:
+                    _ = detector.weapon_detector.model
+                except Exception as exc:
+                    logger.warning("Optional custom weapon model unavailable: %s", exc)
             self._model_load_error = None
         except Exception as exc:
             self._model_load_error = f"{type(exc).__name__}: {exc}"
@@ -135,6 +139,13 @@ class DetectionStage(PipelineStage):
                         "confidence": float(getattr(det, "confidence", 0.0)),
                         "class_id": int(getattr(det, "class_id", 0)),
                         "class_name": str(getattr(det, "class_name", "unknown")),
+                        "object_category": str(getattr(det, "object_category", "generic")),
+                        "is_weapon": bool(getattr(det, "is_weapon", False)),
+                        "is_person": bool(getattr(det, "is_person", False)),
+                        "is_vehicle": bool(getattr(det, "is_vehicle", False)),
+                        "is_animal": bool(getattr(det, "is_animal", False)),
+                        "model_source": str(getattr(det, "model_source", "")),
+                        "source_class_id": getattr(det, "source_class_id", None),
                     })
 
                 results.append({
@@ -162,9 +173,11 @@ class DetectionStage(PipelineStage):
         if self._detector is None:
             return {"loaded": False, "model_path": self._model_path}
 
+        capabilities = self._detector.get_model_capabilities()
         return {
             "loaded": True,
             "model_path": self._model_path,
             "confidence": self._confidence,
             "device": self._device or "auto",
+            **capabilities,
         }

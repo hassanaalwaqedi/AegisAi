@@ -9,12 +9,20 @@ Sprint 2: Production Hardening
 import json
 import asyncio
 import logging
+import time
 from typing import Set, Dict, Any
 from datetime import datetime
 
-from fastapi import WebSocket, WebSocketDisconnect
-from fastapi.routing import APIRouter
+from fastapi import APIRouter, Depends, Header, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 
+from aegis.api.security import (
+    WEBSOCKET_AUTH_PROTOCOL,
+    create_websocket_access_token,
+    verify_api_key,
+    verify_websocket_auth,
+    websocket_subprotocol_token,
+)
 from aegis.api.state import get_state
 
 # Configure module logger
@@ -39,9 +47,9 @@ class ConnectionManager:
         self.active_connections: Set[WebSocket] = set()
         self._lock = asyncio.Lock()
     
-    async def connect(self, websocket: WebSocket) -> None:
+    async def connect(self, websocket: WebSocket, *, subprotocol: str | None = None) -> None:
         """Accept and track new connection."""
-        await websocket.accept()
+        await websocket.accept(subprotocol=subprotocol)
         async with self._lock:
             self.active_connections.add(websocket)
         logger.info(f"WebSocket connected. Total: {len(self.active_connections)}")
@@ -80,6 +88,33 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def build_live_state_message(state: Any) -> Dict[str, Any]:
+    """Build a truthful dashboard update from the current shared state.
+
+    An idle pipeline is not an event stream.  Clients receive a heartbeat and
+    current system status until there are actual tracks or events to publish.
+    This prevents empty arrays from being mistaken for simulated live data.
+    """
+    status = state.get_status()
+    tracks = state.get_tracks()
+    events = state.get_events(limit=20)
+    timestamp = datetime.now().isoformat()
+    if not tracks and not events:
+        return {
+            "type": "heartbeat",
+            "timestamp": timestamp,
+            "status": status,
+        }
+    return {
+        "type": "update",
+        "timestamp": timestamp,
+        "status": status,
+        "tracks": tracks,
+        "events": events,
+        "statistics": state.get_statistics(),
+    }
+
+
 @ws_router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """
@@ -97,21 +132,20 @@ async def websocket_endpoint(websocket: WebSocket):
         "statistics": {...}
     }
     """
-    await manager.connect(websocket)
+    if not await verify_websocket_auth(websocket):
+        return
+
+    selected_protocol = (
+        WEBSOCKET_AUTH_PROTOCOL if websocket_subprotocol_token(websocket) else None
+    )
+    await manager.connect(websocket, subprotocol=selected_protocol)
     
     try:
         while True:
             # Send current state
             state = get_state()
             
-            message = {
-                "type": "update",
-                "timestamp": datetime.now().isoformat(),
-                "status": state.get_status(),
-                "tracks": state.get_tracks(),
-                "events": state.get_events(limit=20),
-                "statistics": state.get_statistics()
-            }
+            message = build_live_state_message(state)
             
             await websocket.send_json(message)
             
@@ -126,9 +160,35 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 @ws_router.get("/ws/clients")
-async def get_client_count():
+async def get_client_count(_: bool = Depends(verify_api_key)):
     """Get number of connected WebSocket clients."""
     return {"count": manager.client_count}
+
+
+@ws_router.post("/ws/token")
+async def create_dashboard_websocket_token(
+    x_aegis_actor: str | None = Header(default=None),
+    _: bool = Depends(verify_api_key),
+):
+    """Exchange server-authenticated API access for a short-lived WS token."""
+    token, expires_at = create_websocket_access_token()
+    from aegis.audit import record_audit
+
+    record_audit(
+        "auth.websocket_token_issued",
+        actor_id=(str(x_aegis_actor or "").strip()[:160] or "api-key-operator"),
+        resource_type="authentication",
+        resource_id="dashboard-websocket",
+        details={"ttl_seconds": max(0, expires_at - int(time.time()))},
+    )
+    return JSONResponse(
+        content={
+            "token": token,
+            "protocol": WEBSOCKET_AUTH_PROTOCOL,
+            "expires_at": expires_at,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def broadcast_event(event: Dict[str, Any]) -> None:

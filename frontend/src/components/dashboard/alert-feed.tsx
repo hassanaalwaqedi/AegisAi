@@ -4,6 +4,8 @@ import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/layout/states";
 import {
   formatDecimal,
+  formatOperatorLabel,
+  formatOperatorList,
   formatTimestamp,
   getEventExplanation,
   getEventId,
@@ -23,8 +25,8 @@ export function AlertFeed({ events, title = "Confirmed Alerts" }: AlertFeedProps
   if (events.length === 0) {
     return (
       <EmptyState
-        title="No risk events detected yet."
-        description="The dashboard will remain clear until the backend emits real risk events."
+        title="No alerts right now."
+        description="New security activity will appear here when it needs review."
       />
     );
   }
@@ -34,7 +36,7 @@ export function AlertFeed({ events, title = "Confirmed Alerts" }: AlertFeedProps
       <CardHeader>
         <div>
           <CardTitle>{title}</CardTitle>
-          <p className="mt-1 text-sm text-slate-400">Validated from GET /events or live WebSocket messages</p>
+          <p className="mt-1 text-sm text-slate-400">Live security activity needing review.</p>
         </div>
         <AlertTriangle className="h-5 w-5 text-amber-200" aria-hidden />
       </CardHeader>
@@ -51,17 +53,17 @@ export function AlertFeed({ events, title = "Confirmed Alerts" }: AlertFeedProps
             </div>
             <div className="mt-3 grid gap-2 text-sm text-slate-300 sm:grid-cols-3">
               <span>Object: {getEventObject(event)}</span>
-              <span>Track: {event.track_id ?? "Not returned"}</span>
+              <span>Track: {event.track_id ?? "Unavailable"}</span>
               <span>Risk: {formatDecimal(getEventRiskScore(event), 2)}</span>
               <span>Weapon: {formatWeapon(event)}</span>
               <span>Association: {formatAssociation(event)}</span>
-              <span>Verification: {event.verification_status ?? "Not returned"}</span>
-              <span>Evidence: {event.evidence_type ?? "Not returned"}</span>
-              <span>Model: {event.model_source?.length ? event.model_source.join(", ") : "Not returned"}</span>
+              <span>Verification: {formatOperatorLabel(event.verification_status)}</span>
+              <span>Evidence: {formatOperatorLabel(event.evidence_type)}</span>
+              <span>Activity source: {formatOperatorList(event.model_source)}</span>
             </div>
-            {event.reason_codes?.length ? <p className="mt-2 text-xs text-slate-500">Reasons: {event.reason_codes.join(", ")}</p> : null}
+            {event.reason_codes?.length ? <p className="mt-2 text-xs text-slate-500">Why it needs review: {formatOperatorList(event.reason_codes)}</p> : null}
             <p className="mt-2 text-sm leading-6 text-slate-400">
-              {getEventExplanation(event) ?? "Explanation not returned by backend for this event."}
+              {getEventExplanation(event) ?? "No additional explanation is available for this alert."}
             </p>
           </div>
         ))}
@@ -71,14 +73,14 @@ export function AlertFeed({ events, title = "Confirmed Alerts" }: AlertFeedProps
 }
 
 function formatWeapon(event: RiskEvent) {
-  if (!event.weapon_class) return "Not returned";
+  if (!event.weapon_class) return "Unavailable";
   const confidence = typeof event.weapon_confidence === "number" ? ` ${Math.round(event.weapon_confidence * 100)}%` : "";
-  return `${event.weapon_class}${confidence}`;
+  return `${formatOperatorLabel(event.weapon_class)}${confidence}`;
 }
 
 function formatAssociation(event: RiskEvent) {
-  if (!event.association_type) return "Not returned";
-  const person = event.person_track_id ? `Person #${event.person_track_id}` : "person not returned";
-  const frames = typeof event.stable_frames === "number" ? `${event.stable_frames} frames` : "frames not returned";
-  return `${event.association_type} with ${person}, ${frames}`;
+  if (!event.association_type) return "Unavailable";
+  const person = event.person_track_id ? `Person #${event.person_track_id}` : "person unavailable";
+  const frames = typeof event.stable_frames === "number" ? `${event.stable_frames} frames` : "duration unavailable";
+  return `${formatOperatorLabel(event.association_type)} with ${person}, ${frames}`;
 }

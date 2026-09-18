@@ -5,14 +5,34 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 
 from aegis.api.security import verify_api_key
-from aegis.ai.schemas import ChatRequest, ChatResponse, VoiceRequest
+from aegis.ai.language import detect_response_language, processing_error_message
+from aegis.ai.schemas import ChatRequest, ChatResponse, OperatorCommandRequest, OperatorExecutionResponse, VoiceRequest
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
+
+
+def _audit_agent_request(response: ChatResponse, *, actor: str | None, voice_mode: bool) -> None:
+    """Audit agent use without persisting the operator's raw message."""
+    from aegis.audit import record_audit
+
+    record_audit(
+        "agent.operational_query",
+        actor_id=(str(actor or "").strip()[:160] or "api-key-operator"),
+        resource_type="agent",
+        resource_id=None,
+        details={
+            "intent": response.intent.value,
+            "response_language": response.response_language.value,
+            "voice_mode": voice_mode,
+            "source_types": sorted({source.type for source in response.sources}),
+            "availability": "unavailable" if response.error else "available",
+        },
+    )
 
 
 def _intelligence_payload() -> Dict[str, Any]:
@@ -45,46 +65,85 @@ def _intelligence_payload() -> Dict[str, Any]:
 @router.post("/chat", response_model=ChatResponse)
 async def ai_chat(
     request: ChatRequest,
+    x_aegis_actor: str | None = Header(default=None),
     _: bool = Depends(verify_api_key),
 ) -> ChatResponse:
     """Process an authenticated text interaction through the AI orchestrator."""
     try:
         from aegis.ai.orchestrator import get_orchestrator
 
-        return get_orchestrator().process(request)
+        response = get_orchestrator().process(request)
     except Exception as exc:
         logger.error("AI chat error: %s", exc)
-        return ChatResponse(
-            answer="I couldn't process your request. Please try again.",
+        response_language = detect_response_language(request.message)
+        response = ChatResponse(
+            answer=processing_error_message(response_language),
             error=str(exc),
             confidence=0.0,
+            response_language=response_language,
         )
+    _audit_agent_request(response, actor=x_aegis_actor, voice_mode=False)
+    return response
+
+
+@router.post("/operator/execute", response_model=OperatorExecutionResponse)
+async def execute_operator(
+    request: OperatorCommandRequest,
+    x_aegis_actor: str | None = Header(default=None),
+    _: bool = Depends(verify_api_key),
+) -> OperatorExecutionResponse:
+    """Execute a typed operator command against authoritative Aegis services."""
+    from aegis.audit import record_audit
+    from aegis.intelligence.operator import execute_operator_command
+
+    response = execute_operator_command(request)
+    record_audit(
+        "agent.command_executed",
+        actor_id=(str(x_aegis_actor or "").strip()[:160] or "api-key-operator"),
+        resource_type="agent",
+        resource_id=response.sources[0].id if response.sources else None,
+        details={
+            "action": response.action,
+            "intent": response.intent.value,
+            "panel": response.panel,
+            "source_types": sorted({source.type for source in response.sources}),
+            "availability": "unavailable" if response.error else "available",
+        },
+    )
+    return response
 
 
 @router.post("/voice", response_model=ChatResponse)
 async def ai_voice(
     request: VoiceRequest,
+    x_aegis_actor: str | None = Header(default=None),
     _: bool = Depends(verify_api_key),
 ) -> ChatResponse:
     """Process explicit, pre-transcribed push-to-talk input only."""
     if not request.text:
-        return ChatResponse(
+        response = ChatResponse(
             answer="No voice input received.",
             error="Empty transcription",
             confidence=0.0,
         )
+        _audit_agent_request(response, actor=x_aegis_actor, voice_mode=True)
+        return response
 
     try:
         from aegis.ai.orchestrator import get_orchestrator
 
-        return get_orchestrator().process(ChatRequest(message=request.text), voice_mode=True)
+        response = get_orchestrator().process(ChatRequest(message=request.text), voice_mode=True)
     except Exception as exc:
         logger.error("AI voice error: %s", exc)
-        return ChatResponse(
-            answer="I couldn't process your voice command.",
+        response_language = detect_response_language(request.text)
+        response = ChatResponse(
+            answer=processing_error_message(response_language),
             error=str(exc),
             confidence=0.0,
+            response_language=response_language,
         )
+    _audit_agent_request(response, actor=x_aegis_actor, voice_mode=True)
+    return response
 
 
 @router.get("/health")

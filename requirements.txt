@@ -44,6 +44,8 @@ slowapi>=0.1.9
 # ─── HTTP / External APIs ────────────────────────────────
 requests>=2.31.0
 yt-dlp>=2024.8.6
+# Bundled ffmpeg binary used to trim the short YouTube connection-test probe.
+imageio-ffmpeg>=0.5.1
 # Official server SDK for Gemini Live (native audio WebSocket sessions).
 # Imported lazily so deployments that leave Live disabled do not need to
 # initialise an external AI client during normal API startup.

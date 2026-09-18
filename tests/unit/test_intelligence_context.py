@@ -76,6 +76,7 @@ def _service(
     redis_connected: bool = True,
     persistence: Dict[str, Any] | None = None,
     persistence_ready: tuple[bool, str | None] = (True, None),
+    durable_events: List[Dict[str, Any]] | None = None,
 ) -> IntelligenceContextService:
     return IntelligenceContextService(
         state_getter=lambda: state or FakeState(),
@@ -88,6 +89,8 @@ def _service(
         ),
         persistence_readiness_check=lambda: persistence_ready,
         settings_getter=lambda: SimpleNamespace(gemini=SimpleNamespace(api_key="")),
+        incident_snapshot_getter=lambda _observed_at: (0, None),
+        durable_events_getter=lambda _limit: list(durable_events or []),
         now=lambda: NOW,
     )
 
@@ -128,6 +131,8 @@ def test_active_camera_ingestion_model_is_preferred_over_an_idle_worker_detector
         database_check=lambda: True,
         persistence_status_getter=lambda: FakePersistenceTelemetry(attempted=1, succeeded=1),
         settings_getter=lambda: SimpleNamespace(gemini=SimpleNamespace(api_key="")),
+        incident_snapshot_getter=lambda _observed_at: (0, None),
+        durable_events_getter=lambda _limit: [],
         now=lambda: NOW,
     )
 
@@ -307,10 +312,52 @@ def test_old_event_and_alert_freshness_uses_their_source_timestamp() -> None:
     assert context.events[0].freshness.observed_at == event_timestamp
     assert context.events[0].freshness.observed_at != context.generated_at
     assert context.events[0].freshness.status == Availability.STALE
-    assert context.alerts.items[0].freshness.observed_at == event_timestamp
-    assert context.alerts.items[0].freshness.status == Availability.STALE
-    assert context.alerts.freshness.observed_at == event_timestamp
-    assert context.alerts.freshness.status == Availability.STALE
+    # Historical evidence remains in the event history, but old alerts must
+    # not be surfaced as active operator work or spoken again.
+    assert context.alerts.items == []
+    assert context.alerts.active_count == 0
+    assert context.alerts.freshness.observed_at == NOW
+    assert context.alerts.freshness.status == Availability.LIVE
+
+
+def test_context_merges_durable_evidence_with_runtime_alerts_by_public_event_id() -> None:
+    context = _service(
+        state=FakeState(
+            events=[
+                {
+                    "event_id": "alert-shared",
+                    "type": "risk_alert",
+                    "timestamp": NOW.isoformat(),
+                    "risk_level": "HIGH",
+                    "explanation": "Runtime acknowledgement state is current.",
+                    "acknowledged": False,
+                }
+            ]
+        ),
+        durable_events=[
+            {
+                "event_id": "alert-durable",
+                "type": "risk_alert",
+                "timestamp": NOW.isoformat(),
+                "risk_level": "CRITICAL",
+                "description": "Durable weapon-risk evidence.",
+                "evidence_status": "persisted",
+            },
+            {
+                "event_id": "alert-shared",
+                "type": "risk_alert",
+                "timestamp": NOW.isoformat(),
+                "risk_level": "HIGH",
+                "description": "Older durable copy.",
+                "evidence_status": "persisted",
+            },
+        ],
+    ).build()
+
+    assert {event.event_id for event in context.events} == {"alert-durable", "alert-shared"}
+    assert {alert.alert_id for alert in context.alerts.items} == {"alert-durable", "alert-shared"}
+    assert context.alerts.active_count == 2
+    assert context.alerts.freshness.status == Availability.LIVE
 
 
 def test_persistence_failure_is_an_explicit_degraded_reason() -> None:
@@ -397,7 +444,7 @@ def test_persistence_readiness_probe_rolls_back_its_internal_record(monkeypatch)
     assert savepoint.rolled_back
 
 
-def test_alerting_stage_enters_the_active_database_session_and_uses_create(monkeypatch) -> None:
+def test_alerting_stage_enters_the_active_database_session_and_uses_idempotent_evidence_create(monkeypatch) -> None:
     """Regression test for the old ``create_event``/un-entered-session bug."""
     from aegis.database import connection, repositories
     from aegis.database.persistence import get_persistence_status, reset_persistence_status
@@ -423,9 +470,9 @@ def test_alerting_stage_enters_the_active_database_session_and_uses_create(monke
         def __init__(self, session: Any) -> None:
             captured["session"] = session
 
-        def create(self, **kwargs: Any) -> object:
+        def create_or_get_evidence(self, **kwargs: Any) -> tuple[object, bool]:
             captured.update(kwargs)
-            return object()
+            return object(), True
 
     reset_persistence_status()
     monkeypatch.setattr(connection, "get_db_session", lambda: session_context)
@@ -466,7 +513,7 @@ def test_alerting_stage_persistence_failure_is_recorded(monkeypatch) -> None:
         def __init__(self, session: Any) -> None:
             del session
 
-        def create(self, **kwargs: Any) -> object:
+        def create_or_get_evidence(self, **kwargs: Any) -> tuple[object, bool]:
             del kwargs
             raise RuntimeError("write rejected")
 

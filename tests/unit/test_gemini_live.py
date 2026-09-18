@@ -207,7 +207,26 @@ async def test_audible_alert_session_revalidates_fresh_high_risk_context_server_
     assert claimed is not None
     assert claimed.audible_alert is not None
     assert claimed.audible_alert.level == "HIGH"
-    assert claimed.audible_alert.text == "High priority alert. Operator review recommended near north-gate."
+    assert claimed.audible_alert.text == "High-risk event detected near north-gate. Evidence has been saved. Operator review is required."
+
+
+@pytest.mark.asyncio
+async def test_audible_alert_is_allowed_when_another_capability_degrades_the_overall_context():
+    context = context_with_verified_alert()
+    context = context.model_copy(
+        update={"overall": context.overall.model_copy(update={"status": Availability.DEGRADED})}
+    )
+    manager = LiveSessionManager(
+        settings_getter=live_settings,
+        sdk_available=lambda: True,
+        context_getter=lambda: context,
+    )
+
+    created = await manager.create("api-key-authenticated-operator", audible_alert_id="alert-verified-1")
+    claimed = await manager.claim_connection(created.session_id, created.connection_token)
+
+    assert claimed is not None
+    assert claimed.audible_alert is not None
 
 
 @pytest.mark.asyncio

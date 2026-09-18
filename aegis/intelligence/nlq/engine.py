@@ -106,52 +106,25 @@ class NLQEngine:
         return QueryType.METRIC
     
     def _get_context(self) -> str:
-        """Get relevant context from database for the query."""
-        context_parts = []
-        
-        # In production, fetch real data from database
-        context_parts.append("Current system status: Online")
-        context_parts.append("Active sessions: 1,247")
-        context_parts.append("Events today: 24,567")
-        context_parts.append("Critical alerts: 3")
-        context_parts.append("Average risk score: 0.34")
-        
-        return "\n".join(context_parts)
+        """Legacy NLQ has no verified operational context source.
+
+        Returning hardcoded metrics here previously allowed an LLM to present
+        fictional operational facts. The public route is disabled until a
+        source-backed implementation replaces this legacy engine.
+        """
+        return ""
     
     def process(self, query: str, db: Session = None) -> NLQResult:
-        """Process a natural language query using OpenAI."""
+        """Report unavailable instead of generating a fabricated answer."""
         query_type = self._classify_query(query)
-        
-        if self._client:
-            answer, confidence = self._query_openai(query, query_type)
-        else:
-            answer = self._generate_fallback_answer(query_type, query)
-            confidence = 0.6
-        
-        result = NLQResult(
+        del db
+        return NLQResult(
             query=query,
             query_type=query_type,
-            answer=answer,
-            confidence=confidence,
-            data={"source": "openai" if self._client else "fallback"},
+            answer="Verified operational data is unavailable for this legacy NLQ endpoint.",
+            confidence=0.0,
+            data={"availability": "unavailable", "reason": "legacy_nlq_has_no_verified_data_source"},
         )
-        
-        # Persist to database
-        session = db or self._db
-        if session:
-            try:
-                repo = NLQRepository(session)
-                repo.save_query(
-                    query=query,
-                    query_type=query_type.value,
-                    answer=answer,
-                    confidence=confidence,
-                    data=result.data,
-                )
-            except Exception as e:
-                logger.error(f"Failed to save query: {e}")
-        
-        return result
     
     def _query_openai(self, query: str, query_type: QueryType) -> tuple[str, float]:
         """Query OpenAI for analysis."""
@@ -187,7 +160,12 @@ Please provide a helpful, data-driven response."""
             return self._generate_fallback_answer(query_type, query), 0.5
     
     def _generate_fallback_answer(self, query_type: QueryType, query: str) -> str:
-        """Generate fallback response when OpenAI is unavailable."""
+        """Compatibility fallback that never invents operational analytics."""
+        del query_type, query
+        return "Verified operational data is unavailable for this legacy NLQ endpoint."
+
+        # Kept below temporarily for source-history readability. It is
+        # unreachable and must not be restored without verified data sources.
         if query_type == QueryType.ROOT_CAUSE:
             return """**Root Cause Analysis**
 

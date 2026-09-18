@@ -17,7 +17,11 @@ from .connection import (
 
 from .models import (
     Event,
+    Observation,
+    RiskAssessment,
     Alert,
+    OperationalAlert,
+    AuditLog,
     TrackStats,
     SessionRecord,
     BehavioralSession,
@@ -34,10 +38,14 @@ from .models import (
 
 from .repositories import (
     EventRepository,
+    ObservationRepository,
+    RiskAssessmentRepository,
     BehavioralSessionRepository,
     TelemetryRepository,
     AnomalyRepository,
     AlertRepository,
+    OperationalAlertRepository,
+    AuditLogRepository,
     NLQRepository,
     InsightRepository,
     ConsentRepository,
@@ -55,7 +63,11 @@ __all__ = [
     "check_connection",
     # Models
     "Event",
+    "Observation",
+    "RiskAssessment",
     "Alert",
+    "OperationalAlert",
+    "AuditLog",
     "TrackStats",
     "SessionRecord",
     "BehavioralSession",
@@ -70,10 +82,14 @@ __all__ = [
     "ConsentRecord",
     # Repositories
     "EventRepository",
+    "ObservationRepository",
+    "RiskAssessmentRepository",
     "BehavioralSessionRepository",
     "TelemetryRepository",
     "AnomalyRepository",
     "AlertRepository",
+    "OperationalAlertRepository",
+    "AuditLogRepository",
     "NLQRepository",
     "InsightRepository",
     "ConsentRepository",

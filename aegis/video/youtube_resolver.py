@@ -49,18 +49,27 @@ def resolve_youtube_stream(raw_url: str) -> ResolvedYouTubeStream:
             "YouTube HTTP streams require yt-dlp. Install dependencies with: pip install -r requirements.txt"
         ) from exc
 
+    import shutil as _shutil
+    _node_exe = _shutil.which("node")
+
     options: Dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
+        # Prefer h.264 dash ≤720p (video-only OK; Aegis only needs frames).
+        # Falls back to any video-containing stream yt-dlp can resolve.
         "format": (
-            "bestvideo[height<=720][vcodec^=avc1][protocol^=http]/"
-            "bestvideo[height<=720][ext=mp4][protocol^=http]/"
-            "best[height<=720][protocol^=http][vcodec!=none]/"
-            "best[protocol^=http][vcodec!=none]/best"
+            "bestvideo[height<=720][vcodec^=avc1][protocol=https]/"
+            "bestvideo[height<=720][protocol=https][vcodec!=none]/"
+            "bestvideo[height<=720][vcodec!=none]/"
+            "best[vcodec!=none]/best"
         ),
     }
+    # yt-dlp >= 2026.09 requires a JS runtime (Node.js / Deno) to extract
+    # YouTube formats.  Wire up Node.js if it is on PATH.
+    if _node_exe:
+        options["js_runtimes"] = [f"node:{_node_exe}"]
 
     with YoutubeDL(options) as ydl:
         info = ydl.extract_info(raw_url, download=False)

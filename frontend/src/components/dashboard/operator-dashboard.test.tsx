@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 
 import { OperatorDashboard, operatorDashboardInternals } from "./operator-dashboard";
-import type { Camera, RiskEvent, StatusResponse } from "@/types";
+import type { Camera, OperationalAlert, RiskEvent, StatusResponse } from "@/types";
 
 function makeCamera(index: number, status: "online" | "offline" | "reconnecting" = "online"): Camera {
   return {
@@ -21,6 +21,15 @@ function makeCamera(index: number, status: "online" | "offline" | "reconnecting"
 }
 
 const readyStatus = { system: { running: true } } as StatusResponse;
+const criticalAlert: OperationalAlert = {
+  alert_id: "alert-internal-9",
+  event_id: "event-internal-9",
+  risk_level: "CRITICAL",
+  message: "Possible armed threat requires review.",
+  camera_id: "camera-internal-2",
+  timestamp: "2026-07-31T21:00:03Z",
+  acknowledged: false,
+};
 const criticalEvent: RiskEvent = {
   event_id: "event-internal-9",
   camera_id: "camera-internal-2",
@@ -36,7 +45,11 @@ function renderDashboard(overrides: Partial<React.ComponentProps<typeof Operator
     <OperatorDashboard
       cameras={[makeCamera(1), makeCamera(2), makeCamera(3, "offline"), makeCamera(4, "reconnecting")]}
       events={[criticalEvent]}
+      alerts={[criticalAlert]}
+      incidents={[]}
+      evidence={[]}
       status={readyStatus}
+      availability={{ status: true, cameras: true, alerts: true, events: true, incidents: true, evidence: true }}
       isLoading={false}
       isUnavailable={false}
       onRetry={onRetry}
@@ -49,79 +62,64 @@ function renderDashboard(overrides: Partial<React.ComponentProps<typeof Operator
 afterEach(cleanup);
 
 describe("OperatorDashboard", () => {
-  it("uses operator-friendly priority copy and keeps technical data out of the main view", () => {
+  it("shows a concise attention-first overview without camera previews", () => {
     renderDashboard();
 
-    expect(screen.getByRole("heading", { name: "High priority" })).toBeInTheDocument();
-    expect(screen.getByText("Immediate review recommended.")).toBeInTheDocument();
-    expect(screen.queryByText("Frames Processed")).not.toBeInTheDocument();
-    expect(screen.queryByText("GET /status")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Operational Overview" })).toBeInTheDocument();
+    expect(screen.getByText("Current risk status and activity requiring attention.")).toBeInTheDocument();
+    expect(screen.getByText("Critical")).toBeInTheDocument();
+    expect(screen.getByText("Active Alerts")).toBeInTheDocument();
+    expect(screen.getByText("Open Incidents")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Needs Attention" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Latest Critical Activity" })).toBeInTheDocument();
+    expect(screen.queryByText("Live view")).not.toBeInTheDocument();
+    expect(screen.queryByText("Camera overview")).not.toBeInTheDocument();
     expect(screen.queryByText("model-private-name")).not.toBeInTheDocument();
     expect(screen.queryByText("RAW_REASON_CODE")).not.toBeInTheDocument();
   });
 
-  it("selects the highest-priority real camera and routes review actions to Camera Wall Focus", () => {
+  it("routes reviews to the dedicated camera and events pages", () => {
     renderDashboard();
 
-    const review = screen.getAllByRole("link", { name: "Review" })[0];
-    expect(review).toHaveAttribute("href", "/cameras?camera=camera-internal-2&view=focus");
-    expect(screen.getByRole("heading", { name: "Camera 2" })).toBeInTheDocument();
-    const openWallLinks = screen.getAllByRole("link", { name: /Open camera wall/i });
-    expect(openWallLinks.some((link) => link.getAttribute("href") === "/cameras?camera=camera-internal-2&view=focus")).toBe(true);
+    const reviewLinks = screen.getAllByRole("link", { name: "Review" });
+    expect(reviewLinks.some((link) => link.getAttribute("href") === "/events")).toBe(true);
+    expect(reviewLinks.some((link) => link.getAttribute("href") === "/cameras?camera=camera-internal-3&view=focus")).toBe(true);
+    expect(screen.getByRole("link", { name: "Open Camera Wall" })).toHaveAttribute("href", "/cameras");
+    expect(screen.getByRole("link", { name: "Search Evidence" })).toHaveAttribute("href", "/semantic");
   });
 
-  it("derives review work and camera counts only from camera runtime and qualifying alerts", () => {
+  it("derives attention from real alerts and camera runtime status", () => {
     const cameras = [makeCamera(1), makeCamera(2, "offline"), makeCamera(3, "reconnecting")];
-    const items = operatorDashboardInternals.buildReviewItems(cameras, [
-      { camera_id: "camera-internal-1", severity: "MEDIUM" },
-      { camera_id: "camera-internal-1", severity: "LOW" },
-    ]);
-    const counts = operatorDashboardInternals.cameraCounts(cameras, items);
+    const items = operatorDashboardInternals.buildAttentionItems({
+      cameras,
+      alerts: [criticalAlert],
+      events: [],
+      incidents: [],
+      status: readyStatus,
+      availability: { status: true, cameras: true, alerts: true, events: true, incidents: true, evidence: true },
+    });
+    const counts = operatorDashboardInternals.cameraCounts(cameras);
 
-    expect(items.map((item) => item.camera.camera_id)).toEqual(expect.arrayContaining(["camera-internal-1", "camera-internal-2", "camera-internal-3"]));
-    expect(counts).toEqual({ total: 3, live: 1, attention: 2, offline: 1 });
+    expect(items.map((item) => item.kind)).toEqual(expect.arrayContaining(["alert", "camera"]));
+    expect(counts).toEqual({ total: 3, live: 1, attention: 1, offline: 1 });
   });
 
-  it("does not fabricate an all-clear state when no cameras are connected", () => {
-    renderDashboard({ cameras: [], events: [] });
+  it("shows unavailable rather than fabricated values when a source cannot be loaded", () => {
+    renderDashboard({
+      alerts: undefined,
+      incidents: undefined,
+      evidence: undefined,
+      availability: { status: true, cameras: true, alerts: false, events: true, incidents: false, evidence: false },
+      isUnavailable: true,
+    });
 
-    expect(screen.getByRole("heading", { name: "No cameras connected" })).toBeInTheDocument();
-    expect(screen.getByText("No cameras connected yet.")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "All clear" })).not.toBeInTheDocument();
-  });
-
-  it("shows all-clear only with complete, live runtime data and no review work", () => {
-    renderDashboard({ cameras: [makeCamera(1)], events: [] });
-    expect(screen.getByRole("heading", { name: "All clear" })).toBeInTheDocument();
-    expect(screen.getByText("No urgent activity needs review.")).toBeInTheDocument();
-  });
-
-  it("does not call a degraded service all-clear", () => {
-    renderDashboard({ cameras: [makeCamera(1)], events: [], status: { system: { running: false } } as StatusResponse });
-    expect(screen.getByRole("heading", { name: "Needs attention" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "All clear" })).not.toBeInTheDocument();
-  });
-
-  it("renders a truthful unavailable state with a real retry action and no fake counts", () => {
-    const { onRetry } = renderDashboard({ cameras: [], events: [], isUnavailable: true });
-
-    expect(screen.getByRole("heading", { name: "System unavailable" })).toBeInTheDocument();
-    expect(screen.getByText("Live camera data is temporarily unavailable.")).toBeInTheDocument();
-    expect(screen.queryByText("0 total")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    expect(onRetry).toHaveBeenCalledOnce();
+    expect(screen.getByText("Degraded")).toBeInTheDocument();
+    expect(screen.getAllByText("Unavailable").length).toBeGreaterThan(0);
   });
 
   it("uses skeletons without operational values while loading", () => {
     renderDashboard({ isLoading: true });
-    expect(screen.getByLabelText("Loading security overview")).toBeInTheDocument();
-    expect(screen.queryByText("All clear")).not.toBeInTheDocument();
-    expect(screen.queryByText("0")).not.toBeInTheDocument();
-  });
-
-  it("keeps diagnostics collapsed until an operator explicitly opens it", () => {
-    renderDashboard();
-    const diagnostics = screen.getByText("Diagnostics").closest("details");
-    expect(diagnostics).not.toHaveAttribute("open");
+    expect(screen.getByLabelText("Loading operational overview")).toBeInTheDocument();
+    expect(screen.queryByText("Critical alert")).not.toBeInTheDocument();
   });
 });

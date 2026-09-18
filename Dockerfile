@@ -43,9 +43,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY --chown=aegis:aegis . .
 
-# Preload the default model used by the API detection route.
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')" && \
-    chown aegis:aegis /app/yolov8n.pt
+# Preload the exact base detector configured by the API. The detector refuses
+# to auto-download at runtime so readiness truthfully reports missing weights.
+RUN python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')" && \
+    chown aegis:aegis /app/yolo11n.pt
 
 # Create data directories
 RUN mkdir -p /app/data/input /app/data/output && \

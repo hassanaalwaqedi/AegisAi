@@ -137,6 +137,11 @@ class TrackHistoryManager:
     def active_track_count(self) -> int:
         """Get number of active tracks."""
         return len(self._histories)
+
+    @property
+    def track_count(self) -> int:
+        """Compatibility name for the real number of retained track histories."""
+        return len(self._histories)
     
     def update(
         self,

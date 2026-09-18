@@ -6,13 +6,16 @@ const statusLabel: Record<CameraConnectionStatus, string> = {
   offline: "Offline",
   connecting: "Connecting",
   reconnecting: "Reconnecting",
-  error: "Error",
-  stopped: "Stopped"
+  error: "Needs attention",
+  stopped: "Stopped",
+  failed: "Needs attention",
+  unverified: "Not verified",
+  disabled: "Disabled"
 };
 
 export function CameraStatusBadge({ status }: { status: CameraConnectionStatus }) {
   const variant =
-    status === "online" ? "success" : status === "connecting" || status === "reconnecting" ? "warning" : status === "error" ? "danger" : "outline";
+    status === "online" ? "success" : status === "connecting" || status === "reconnecting" || status === "unverified" ? "warning" : status === "error" || status === "failed" ? "danger" : "outline";
 
   return <Badge variant={variant}>{statusLabel[status]}</Badge>;
 }

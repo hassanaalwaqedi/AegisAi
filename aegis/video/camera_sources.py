@@ -73,6 +73,14 @@ FrameCallback = Callable[[str, np.ndarray], None]
 StatusCallback = Callable[[str, "CameraConnectionStatus", Optional[str]], None]
 
 
+@dataclass(frozen=True)
+class EventSnapshot:
+    """Result of writing one alert-triggering keyframe to local evidence storage."""
+
+    path: Optional[str]
+    status: str
+
+
 class CameraSourceType(str, Enum):
     LOCAL_DEVICE = "LOCAL_DEVICE"
     RTSP_STREAM = "RTSP_STREAM"
@@ -673,9 +681,15 @@ class FrameIngestionService:
         self._risk_engines: Dict[str, Any] = {}
         self._proximity_engines: Dict[str, Any] = {}
         self._association_engines: Dict[str, Any] = {}
+        self._weapon_aggression_engines: Dict[str, Any] = {}
         self._frame_counters: Dict[str, int] = {}
+        # A tracker reset can reuse a small numeric ID.  Persisted observations
+        # therefore carry a new source epoch instead of pretending that IDs
+        # from separate camera sessions are the same entity.
+        self._camera_source_epochs: Dict[str, str] = {}
         self._camera_start_ts: Dict[str, float] = {}
         self._high_risk_frames: Dict[str, int] = {}
+        self._fallback_alert_cooldowns: Dict[str, float] = {}
         # Per-camera metadata fingerprints let edited zones take effect without
         # restarting the camera pipeline.
         self._configured_zones: Dict[str, str] = {}
@@ -700,10 +714,14 @@ class FrameIngestionService:
         frame: np.ndarray,
         camera_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        if camera_id not in self._camera_start_ts:
-            self._camera_start_ts[camera_id] = time.time()
-
+        camera_metadata = camera_metadata or {}
+        camera_name = camera_metadata.get("camera_name") or camera_metadata.get("name")
         with self._lock:
+            # Capture the start timestamp once for this in-flight frame.  A
+            # camera stop may concurrently clear the per-camera maps, but the
+            # worker must finish safely instead of indexing a removed key.
+            start_timestamp = self._camera_start_ts.setdefault(camera_id, time.time())
+            source_epoch = self._camera_source_epochs.setdefault(camera_id, uuid.uuid4().hex)
             self._frame_counters[camera_id] = self._frame_counters.get(camera_id, 0) + 1
             frame_id = self._frame_counters[camera_id]
 
@@ -718,6 +736,7 @@ class FrameIngestionService:
         risk_engine = self._get_risk_engine(camera_id, frame, camera_metadata)
         proximity_engine = self._get_proximity_engine(camera_id)
         association_engine = self._get_association_engine(camera_id)
+        weapon_aggression_engine = self._get_weapon_aggression_engine(camera_id)
 
         detections = detector.detect(frame)
         detection_classes = [getattr(det, "class_name", "unknown") for det in detections]
@@ -731,7 +750,7 @@ class FrameIngestionService:
 
         tracks = tracker.update(detections, frame)
         now = datetime.utcnow()
-        timestamp_seconds = time.time() - self._camera_start_ts[camera_id]
+        timestamp_seconds = time.time() - start_timestamp
 
         history_manager.update(tracks, frame_id=frame_id, timestamp=timestamp_seconds)
         motion_states = motion_analyzer.analyze_all(history_manager)
@@ -776,6 +795,22 @@ class FrameIngestionService:
         analysis_by_track = {analysis.track_id: analysis for analysis in track_analyses}
         association_by_person = {item.person_track_id: item.to_dict() for item in associations if item.association_type != "none"}
         association_by_weapon = {item.weapon_track_id: item.to_dict() for item in associations if item.association_type != "none"}
+        threat_contexts = weapon_aggression_engine.assess(
+            tracks=tracks,
+            associations=associations,
+            analyses=analysis_by_track,
+            frame_id=frame_id,
+        )
+        threat_by_track: Dict[str, Dict[str, Any]] = {}
+        for context in threat_contexts:
+            context_payload = context.to_dict()
+            context_track_ids = [context.armed_person_track_id]
+            if context.weapon_track_id:
+                context_track_ids.append(context.weapon_track_id)
+            for context_track_id in context_track_ids:
+                current = threat_by_track.get(str(context_track_id))
+                if current is None or float(context_payload["risk_score"]) > float(current["risk_score"]):
+                    threat_by_track[str(context_track_id)] = context_payload
 
         logger.debug("Tracks camera_id=%s frame_id=%s count=%s", camera_id, frame_id, len(tracks))
 
@@ -797,6 +832,7 @@ class FrameIngestionService:
             detector_model_source = getattr(track, "model_source", "") or self.get_model_capabilities().get("model_name", "")
             raw_track_id = str(getattr(track, "track_id", ""))
             association = association_by_person.get(raw_track_id) or association_by_weapon.get(raw_track_id)
+            threat_context = threat_by_track.get(raw_track_id)
             analysis = analysis_by_track.get(track.track_id)
             risk_score_obj = risk_by_track.get(track.track_id)
             risk_score = float(risk_score_obj.score) if risk_score_obj else 0.0
@@ -844,11 +880,22 @@ class FrameIngestionService:
                 motion_confirmed=motion_confirmed,
                 frame_detected_classes=frame_detected_classes,
                 association=association,
+                threat_context=threat_context,
             )
             risk_level = evidence["risk_level"]
             risk_score = evidence["risk_score"]
             explanation = evidence["explanation"]
             factors = evidence["reason_codes"]
+            # This read only carries the evaluated zone into the evidence
+            # record. It does not change RiskEngine scoring or alert policy.
+            zone_manager = getattr(risk_engine, "zone_manager", None)
+            zone_context = zone_manager.get_context(bbox=bbox) if zone_manager else None
+            zone_id = (
+                zone_context.zone.zone_id
+                if zone_context and zone_context.in_zone and zone_context.zone
+                else None
+            )
+            zone_name = zone_context.zone_name if zone_context and zone_context.in_zone else None
 
             # This optional sidecar is intentionally after normal detection,
             # tracking, and risk computation. It cannot influence their result.
@@ -874,6 +921,8 @@ class FrameIngestionService:
 
             payload = {
                 "camera_id": camera_id,
+                "camera_name": camera_name,
+                "source_epoch": source_epoch,
                 "track_id": track_key,
                 "raw_track_id": getattr(track, "track_id", None),
                 "class_name": class_name,
@@ -884,6 +933,8 @@ class FrameIngestionService:
                 "is_weapon": is_weapon,
                 "confidence": float(getattr(track, "confidence", 0.0)),
                 "bbox": list(bbox),
+                "zone_id": zone_id,
+                "zone_name": zone_name,
                 "model_source": evidence["model_source"],
                 "detection_model_source": detector_model_source,
                 "risk_level": risk_level,
@@ -904,6 +955,9 @@ class FrameIngestionService:
                 "association_score": evidence["association_score"],
                 "stable_frames": evidence["stable_frames"],
                 "evidence_objects": evidence["evidence_objects"],
+                "threat_event_type": evidence.get("threat_event_type"),
+                "nearby_person_track_id": evidence.get("nearby_person_track_id"),
+                "threat_context": evidence.get("threat_context"),
                 "vehicle_enrichment": vehicle_enrichment,
                 "detected_classes": frame_detected_classes,
                 "movement_state": movement_state,
@@ -958,15 +1012,24 @@ class FrameIngestionService:
                 payload["duration_seconds"] = registry_entry.get("duration_seconds")
                 payload["total_seen_count"] = registry_entry.get("total_seen_count")
 
-            detection_event = self._maybe_generate_detection_event(
-                camera_id=camera_id,
-                track_payload=payload,
-                frame_number=frame_id,
-                timestamp=now,
-            )
-            if detection_event:
-                generated_events.append(detection_event)
+        # Persist raw track/relationship measurements before generating an
+        # alert. A cooldown may suppress notification, but it must not erase
+        # the observations needed to explain or later reassess the scene.
+        self._persist_frame_observations(
+            camera_id=camera_id,
+            source_epoch=source_epoch,
+            frame_id=frame_id,
+            captured_at=now,
+            track_payloads=track_payloads,
+        )
 
+        for payload in track_payloads:
+            # Composite threat context is copied onto the weapon track for
+            # evidence display, but only the actor/person track may own the
+            # operational event. This keeps top-level bbox/track identity
+            # deterministic regardless of tracker output order.
+            if not self._is_primary_threat_track(payload):
+                continue
             event_payload = self._maybe_generate_alert(
                 camera_id=camera_id,
                 track_payload=payload,
@@ -976,6 +1039,19 @@ class FrameIngestionService:
             )
             if event_payload:
                 generated_events.append(event_payload)
+            confirmed_threat = bool(payload.get("threat_context")) and (
+                payload.get("risk_level") in {"HIGH", "CRITICAL"}
+                and payload.get("verification_status") in {"confirmed", "critical"}
+            )
+            if event_payload is None and not confirmed_threat:
+                detection_event = self._maybe_generate_detection_event(
+                    camera_id=camera_id,
+                    track_payload=payload,
+                    frame_number=frame_id,
+                    timestamp=now,
+                )
+                if detection_event:
+                    generated_events.append(detection_event)
 
         logger.debug(
             "Risk scores camera_id=%s frame_id=%s scores=%s",
@@ -1065,6 +1141,43 @@ class FrameIngestionService:
     def get_camera_detections(self, camera_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         return [item for item in list(self._detections) if item.get("camera_id") == camera_id][-limit:]
 
+    def reset_camera(self, camera_id: str) -> None:
+        """Drop per-camera temporal state without deleting durable evidence."""
+        camera_prefix = f"{camera_id}:"
+        with self._lock:
+            for mapping in (
+                self._trackers,
+                self._history_managers,
+                self._motion_analyzers,
+                self._behavior_analyzers,
+                self._crowd_analyzers,
+                self._risk_engines,
+                self._proximity_engines,
+                self._association_engines,
+                self._weapon_aggression_engines,
+            ):
+                mapping.pop(camera_id, None)
+            self._frame_counters.pop(camera_id, None)
+            self._camera_source_epochs.pop(camera_id, None)
+            self._camera_start_ts.pop(camera_id, None)
+            self._configured_zones.pop(camera_id, None)
+            self._high_risk_frames = {
+                key: value
+                for key, value in self._high_risk_frames.items()
+                if not str(key).startswith(camera_prefix)
+            }
+            self._fallback_alert_cooldowns = {
+                key: value
+                for key, value in self._fallback_alert_cooldowns.items()
+                if not str(key).startswith(camera_prefix)
+            }
+            self._emitted_detection_events = {
+                key for key in self._emitted_detection_events
+                if not str(key).startswith(camera_prefix)
+            }
+        if self._alert_manager is not None and hasattr(self._alert_manager, "clear_cooldowns"):
+            self._alert_manager.clear_cooldowns(prefix=camera_prefix)
+
     def get_stats(self) -> Dict[str, Any]:
         with self._lock:
             return {
@@ -1086,31 +1199,66 @@ class FrameIngestionService:
         from config import DetectionConfig
 
         config = DetectionConfig()
+        base_detector_available = Path(config.model_path).is_file()
         class_names = dict(config.CLASS_NAMES)
         target_classes = tuple(config.target_classes)
-        person_supported = [
+        configured_person_classes = [
             class_names.get(class_id, f"class_{class_id}")
             for class_id in sorted(set(target_classes))
         ]
+        person_supported = configured_person_classes if base_detector_available else []
         weapon_supported = list(config.weapon_model_class_names.values())
-        weapon_detection_supported = Path(config.weapon_model_path).exists()
+        base_weapon_supported = ([
+            class_names.get(class_id, f"class_{class_id}")
+            for class_id in sorted(set(target_classes) & set(config.weapon_classes))
+        ] if base_detector_available else [])
+        custom_weapon_supported = Path(config.weapon_model_path).is_file()
+        available_custom_classes = weapon_supported if custom_weapon_supported else []
+        supported_weapon_classes = list(dict.fromkeys([*base_weapon_supported, *available_custom_classes]))
+        supported_families = {
+            (
+                "firearm"
+                if str(value).strip().lower().replace("_", " ") in {"gun", "pistol", "firearm", "handgun"}
+                else str(value).strip().lower().replace("_", " ")
+            )
+            for value in supported_weapon_classes
+        }
+        unsupported_weapon_concepts = []
+        if "weapon" not in supported_families:
+            unsupported_weapon_concepts.append("generic weapon")
+        if "sharp object" not in supported_families:
+            unsupported_weapon_concepts.append("generic sharp object")
+        if "firearm" not in supported_families:
+            unsupported_weapon_concepts.extend(["gun", "pistol"])
 
         return {
             "model_name": config.model_path,
-            "supported_classes": [*person_supported, *weapon_supported],
-            "weapon_detection_supported": weapon_detection_supported,
+            "base_detector_available": base_detector_available,
+            "supported_classes": list(dict.fromkeys([*person_supported, *available_custom_classes])),
+            "supported_weapon_classes": supported_weapon_classes,
+            "unsupported_weapon_concepts": unsupported_weapon_concepts,
+            "weapon_detection_supported": bool(supported_weapon_classes),
             "person_detector": {
                 "model_name": config.model_path,
+                "detector_available": base_detector_available,
+                "availability": "configured_not_loaded" if base_detector_available else "unavailable",
+                "unavailable_reason": None if base_detector_available else f"Base detector weights are unavailable: {config.model_path}",
                 "supported_classes": person_supported,
+                "weapon_classes": base_weapon_supported,
+                "weapon_detection_supported": bool(base_weapon_supported),
             },
             "weapon_detector": {
                 "model_name": config.weapon_model_path,
                 "supported_classes": weapon_supported,
+                "available_classes": available_custom_classes,
                 "internal_class_ids": {
                     name: int(config.weapon_internal_class_ids[source_id])
                     for source_id, name in config.weapon_model_class_names.items()
                 },
-                "weapon_detection_supported": weapon_detection_supported,
+                "weapon_detection_supported": custom_weapon_supported,
+                "class_mapping_validated": False,
+                "validation_status": "configured_not_loaded" if custom_weapon_supported else "unavailable",
+                "limitation": None if custom_weapon_supported else f"Weapon detector weights are unavailable: {config.weapon_model_path}",
             },
             "action_recognition_supported": False,
             "pose_estimation_supported": False,
@@ -1195,6 +1343,13 @@ class FrameIngestionService:
 
             self._association_engines[camera_id] = PersonWeaponAssociationEngine()
         return self._association_engines[camera_id]
+
+    def _get_weapon_aggression_engine(self, camera_id: str):
+        if camera_id not in self._weapon_aggression_engines:
+            from aegis.risk.weapon_aggression import WeaponAggressionRiskLayer
+
+            self._weapon_aggression_engines[camera_id] = WeaponAggressionRiskLayer()
+        return self._weapon_aggression_engines[camera_id]
 
     def _get_alert_manager(self):
         if self._alert_manager is None:
@@ -1315,6 +1470,7 @@ class FrameIngestionService:
         motion_confirmed: bool,
         frame_detected_classes: List[str],
         association: Optional[Dict[str, Any]] = None,
+        threat_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         capabilities = self.get_model_capabilities()
         class_name = getattr(track, "class_name", "unknown")
@@ -1334,6 +1490,8 @@ class FrameIngestionService:
         weapon_confidence = None
         person_track_id = None
         weapon_track_id = None
+        nearby_person_track_id = None
+        threat_event_type = None
         evidence_objects: List[Dict[str, Any]] = []
 
         if is_person or is_vehicle:
@@ -1361,6 +1519,7 @@ class FrameIngestionService:
             person_track_id = association.get("person_track_id") if association else None
             evidence_type = "object_detection"
             reason_codes.add("WEAPON_MODEL_DETECTION")
+            reason_codes.add("WEAPON_LIKE_OBJECT_DETECTION")
             reason_codes.add(f"{weapon_class.upper()}_DETECTED")
             if not capabilities["weapon_detection_supported"]:
                 reason_codes.add("WEAPON_MODEL_UNSUPPORTED")
@@ -1396,10 +1555,15 @@ class FrameIngestionService:
                 evidence_type = "proximity"
                 reason_codes.add("WEAPON_ASSOCIATED_WITH_PERSON")
                 if confidence >= 0.85 and (association_score or 0.0) >= 0.75 and stable_frames >= 3:
-                    risk_level = "CRITICAL"
-                    risk_score = max(min(0.95, confidence * 0.70 + (association_score or 0.0) * 0.25), 0.80)
-                    verification_status = "critical"
+                    # Bounding-box containment is useful evidence, but it is
+                    # not proof of harmful intent, ownership, or an active
+                    # confrontation. Keep it HIGH and require a separate
+                    # interaction/explicit-critical signal for CRITICAL.
+                    risk_level = "HIGH"
+                    risk_score = max(min(0.72, confidence * 0.60 + (association_score or 0.0) * 0.25), 0.60)
+                    verification_status = "confirmed"
                     reason_codes.add("STABLE_WEAPON_PERSON_ASSOCIATION")
+                    reason_codes.add("INTERACTION_CONFIRMATION_REQUIRED")
                 elif confidence >= 0.70 and stable_frames >= 2:
                     risk_level = "HIGH"
                     risk_score = max(min(0.72, confidence * 0.60 + (association_score or 0.0) * 0.25), 0.55)
@@ -1433,10 +1597,11 @@ class FrameIngestionService:
                 verification_status = "confirmed"
                 reason_codes.add("WEAPON_NEAR_PERSON_STABLE")
             elif association_type in {"contained", "overlap"} and weapon_confidence >= 0.85 and (association_score or 0.0) >= 0.75 and stable_frames >= 3:
-                risk_level = "CRITICAL"
-                risk_score = max(risk_score, 0.80)
-                verification_status = "critical"
+                risk_level = "HIGH"
+                risk_score = max(risk_score, 0.60)
+                verification_status = "confirmed"
                 reason_codes.add("STABLE_WEAPON_PERSON_ASSOCIATION")
+                reason_codes.add("INTERACTION_CONFIRMATION_REQUIRED")
             elif association_type in {"contained", "overlap", "near"}:
                 risk_level = "MEDIUM"
                 risk_score = max(risk_score, 0.42)
@@ -1470,6 +1635,49 @@ class FrameIngestionService:
                 risk_score = min(max(risk_score, 0.25), 0.45)
                 explanation = "Candidate movement requires further temporal confirmation."
 
+        if threat_context:
+            context_level = str(threat_context.get("risk_level") or "LOW").upper()
+            context_score = float(threat_context.get("risk_score") or 0.0)
+            context_status = str(threat_context.get("verification_status") or "candidate")
+            level_rank = {"LOW": 0, "CANDIDATE_MEDIUM": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+            reason_codes.update(str(code) for code in threat_context.get("reason_codes") or [])
+            threat_event_type = str(threat_context.get("event_type") or "possible_threat")
+            person_track_id = str(threat_context.get("armed_person_track_id") or person_track_id or "") or None
+            nearby_person_track_id = str(threat_context.get("nearby_person_track_id") or "") or None
+            weapon_track_id = str(threat_context.get("weapon_track_id") or weapon_track_id or "") or None
+            weapon_class = threat_context.get("weapon_class") or weapon_class
+            if threat_context.get("weapon_confidence") is not None:
+                weapon_confidence = float(threat_context["weapon_confidence"])
+            association_type = threat_context.get("association_type") or association_type
+            if threat_context.get("association_score") is not None:
+                association_score = float(threat_context["association_score"])
+            stable_frames = max(stable_frames, int(threat_context.get("confirmed_frames") or 0))
+            if level_rank.get(context_level, 0) >= level_rank.get(risk_level, 0):
+                risk_level = context_level
+                risk_score = max(risk_score, context_score)
+                verification_status = context_status
+            evidence_type = (
+                "weapon_aggression_context"
+                if threat_context.get("weapon_track_id")
+                else "aggression_context"
+            )
+            explanation = str(threat_context.get("explanation") or explanation)
+
+        evidence_weapon_class = str(weapon_class or (association or {}).get("weapon_class") or "").strip()
+        if (is_weapon or evidence_weapon_class) and not self._weapon_class_supported(capabilities, evidence_weapon_class or class_name):
+            reason_codes.update({"WEAPON_MODEL_UNSUPPORTED", "WEAPON_CLASS_UNSUPPORTED"})
+            risk_level = "LOW"
+            risk_score = min(risk_score, 0.10)
+            evidence_type = "unsupported"
+            verification_status = "unsupported"
+            if capabilities.get("weapon_detection_supported"):
+                explanation = (
+                    f"{(evidence_weapon_class or str(class_name)).title()} is not supported by the available detector weights. "
+                    "Operator review requires a compatible local weapon model."
+                )
+            else:
+                explanation = "No weapon model is currently enabled. Risk remains LOW because no confirmed threat evidence exists."
+
         weaponish_text = " ".join([explanation, *factors, *reason_codes]).lower()
         if any(term in weaponish_text for term in ("weapon", "knife", "gun", "firearm", "pistol", "rifle")):
             if not capabilities["weapon_detection_supported"]:
@@ -1487,7 +1695,16 @@ class FrameIngestionService:
         if risk_level in {"HIGH", "CRITICAL"}:
             has_confirmed_high_evidence = any(
                 code in reason_codes
-                for code in {"ZONE_INTRUSION", "CONFIRMED_MULTI_SIGNAL_RISK", "WEAPON_NEAR_PERSON_STABLE", "STABLE_WEAPON_PERSON_ASSOCIATION"}
+                for code in {
+                    "ZONE_INTRUSION",
+                    "CONFIRMED_MULTI_SIGNAL_RISK",
+                    "WEAPON_NEAR_PERSON_STABLE",
+                    "STABLE_WEAPON_PERSON_ASSOCIATION",
+                    "POSSIBLE_ARMED_THREAT",
+                    "CONFIRMED_AGGRESSION_PATTERN",
+                    "CRITICAL_WEAPON_AGGRESSION_COMBINATION",
+                    "HIGH_CONFIDENCE_WEAPON_ASSOCIATION",
+                }
             )
             if not has_confirmed_high_evidence:
                 reason_codes.add("HIGH_RISK_NOT_CONFIRMED")
@@ -1497,7 +1714,13 @@ class FrameIngestionService:
                 explanation = "Risk remains LOW because no confirmed threat evidence exists." if risk_level == "LOW" else "Motion candidate detected from bounding-box movement. Candidate movement requires further temporal confirmation."
 
         if risk_level == "CRITICAL":
-            has_critical_evidence = any(code in reason_codes for code in {"STABLE_WEAPON_PERSON_ASSOCIATION", "EXPLICIT_CRITICAL_SIGNAL"})
+            has_critical_evidence = any(
+                code in reason_codes
+                for code in {
+                    "EXPLICIT_CRITICAL_SIGNAL",
+                    "CRITICAL_WEAPON_AGGRESSION_COMBINATION",
+                }
+            )
             if not has_critical_evidence:
                 reason_codes.add("CRITICAL_EVIDENCE_MISSING")
                 risk_level = "CANDIDATE_MEDIUM"
@@ -1509,15 +1732,22 @@ class FrameIngestionService:
         model_source = [detector_source, "bytetrack"]
         if association:
             model_source.append("person_weapon_association")
+        if threat_context:
+            model_source.append("weapon_aggression_rules")
         if evidence_type in {"bbox_motion", "temporal_behavior"}:
             model_source.append("bbox_motion_rules")
         if is_weapon or association:
+            weapon_model_source = (
+                (threat_context or {}).get("weapon_model_source")
+                or (association or {}).get("weapon_model_source")
+                or detector_source
+            )
             evidence_objects.append({
                 "object_class": weapon_class or str(class_name).lower(),
                 "confidence": weapon_confidence if weapon_confidence is not None else confidence,
                 "track_id": weapon_track_id or str(getattr(track, "track_id", "")),
                 "bbox": association.get("weapon_bbox") if association else list(bbox),
-                "model_source": detector_source,
+                "model_source": weapon_model_source,
             })
         if association and person_track_id:
             evidence_objects.append({
@@ -1526,6 +1756,24 @@ class FrameIngestionService:
                 "track_id": person_track_id,
                 "bbox": association.get("person_bbox"),
                 "model_source": "bytetrack",
+            })
+        elif threat_context and person_track_id:
+            evidence_objects.append({
+                "object_class": "person",
+                "confidence": confidence,
+                "track_id": person_track_id,
+                "bbox": threat_context.get("armed_person_bbox") or list(bbox),
+                "model_source": "bytetrack",
+                "role": "observed_person",
+            })
+        if threat_context and nearby_person_track_id:
+            evidence_objects.append({
+                "object_class": "person",
+                "confidence": None,
+                "track_id": nearby_person_track_id,
+                "bbox": threat_context.get("nearby_person_bbox"),
+                "model_source": "bytetrack",
+                "role": "nearby_person",
             })
 
         return {
@@ -1542,10 +1790,12 @@ class FrameIngestionService:
                 "detected_classes_in_frame": frame_detected_classes,
                 "object_confidence": confidence,
                 "weapon_detection_supported": capabilities["weapon_detection_supported"],
+                "weapon_class_supported": self._weapon_class_supported(capabilities, evidence_weapon_class or class_name),
                 "action_recognition_supported": capabilities["action_recognition_supported"],
                 "pose_estimation_supported": capabilities["pose_estimation_supported"],
                 "semantic_verification_supported": capabilities["semantic_verification_supported"],
                 "association": association,
+                "threat_context": threat_context,
             },
             "weapon_class": weapon_class,
             "weapon_confidence": round(weapon_confidence, 3) if weapon_confidence is not None else None,
@@ -1555,6 +1805,9 @@ class FrameIngestionService:
             "association_score": round(association_score, 3) if association_score is not None else None,
             "stable_frames": stable_frames,
             "evidence_objects": evidence_objects,
+            "threat_event_type": threat_event_type,
+            "nearby_person_track_id": nearby_person_track_id,
+            "threat_context": threat_context,
             "explanation": self._sanitize_explanation(explanation, capabilities),
         }
 
@@ -1577,6 +1830,22 @@ class FrameIngestionService:
         if normalized.startswith("WEAPON_OVERLAP") or normalized.startswith("WEAPON_PROXIMITY"):
             return "WEAPON_NEAR_PERSON"
         return aliases.get(normalized, normalized)
+
+    @staticmethod
+    def _weapon_class_supported(capabilities: Dict[str, Any], class_name: str) -> bool:
+        if not capabilities.get("weapon_detection_supported"):
+            return False
+        configured = capabilities.get("supported_weapon_classes") or capabilities.get("supported_classes") or []
+        supported = {str(value).strip().lower().replace("_", " ") for value in configured}
+        normalized = str(class_name or "").strip().lower().replace("_", " ")
+        aliases = {
+            "gun": {"gun", "pistol", "firearm"},
+            "pistol": {"gun", "pistol", "firearm"},
+            "firearm": {"gun", "pistol", "firearm"},
+            "bat": {"bat", "baseball bat"},
+            "baseball bat": {"bat", "baseball bat"},
+        }
+        return bool((aliases.get(normalized, {normalized})) & supported)
 
     def _sanitize_explanation(self, explanation: str, capabilities: Dict[str, Any]) -> str:
         lowered = explanation.lower()
@@ -1647,6 +1916,125 @@ class FrameIngestionService:
                 return entry
         return None
 
+    @staticmethod
+    def _is_primary_threat_track(track_payload: Dict[str, Any]) -> bool:
+        threat_context = track_payload.get("threat_context") or {}
+        if not threat_context:
+            return True
+        actor_id = str(
+            threat_context.get("armed_person_track_id")
+            or track_payload.get("person_track_id")
+            or ""
+        )
+        return str(track_payload.get("raw_track_id") or "") == actor_id
+
+    @staticmethod
+    def _camera_track_key(camera_id: str, raw_track_id: object) -> Optional[str]:
+        value = str(raw_track_id or "").strip()
+        if not value:
+            return None
+        return value if value.startswith(f"{camera_id}:") else f"{camera_id}:{value}"
+
+    def _persist_frame_observations(
+        self,
+        *,
+        camera_id: str,
+        source_epoch: str,
+        frame_id: int,
+        captured_at: datetime,
+        track_payloads: List[Dict[str, Any]],
+    ) -> None:
+        """Persist raw camera measurements before event or alert policy runs.
+
+        The first local-PC slice stores one detector/track observation per
+        current track and one relation observation for a reported geometric
+        association. It never turns detection confidence into incident risk.
+        """
+        if not track_payloads:
+            return
+        try:
+            from aegis.database.connection import get_db_session
+            from aegis.database.persistence import get_persistence_status
+            from aegis.database.repositories import ObservationRepository
+
+            with get_db_session() as session:
+                repository = ObservationRepository(session)
+                for payload in track_payloads:
+                    track_key = str(payload.get("track_id") or "").strip() or None
+                    raw_track_id = str(payload.get("raw_track_id") or track_key or "untracked")
+                    base_id = f"obs:{camera_id}:{source_epoch}:{frame_id}:{raw_track_id}"
+                    metadata = {
+                        "risk_level": payload.get("risk_level"),
+                        "policy_score": float(payload.get("risk_score") or 0.0),
+                        "verification_status": payload.get("verification_status"),
+                        "reason_codes": list(payload.get("reason_codes") or []),
+                        "risk_factors": list(payload.get("risk_factors") or []),
+                        "model_source": list(payload.get("model_source") or []),
+                        "behavior_labels": list(payload.get("behavior_labels") or []),
+                        "stable_frames": payload.get("stable_frames"),
+                    }
+                    observation, _ = repository.create_or_get(
+                        observation_id=f"{base_id}:detection",
+                        camera_id=camera_id,
+                        source_epoch=source_epoch,
+                        captured_at=captured_at,
+                        frame_id=frame_id,
+                        track_key=track_key,
+                        related_track_key=None,
+                        observation_type="track_detection",
+                        label=str(payload.get("class_name") or "unknown"),
+                        model_confidence=float(payload.get("confidence") or 0.0),
+                        bounding_box=payload.get("bbox"),
+                        zone_id=payload.get("zone_id"),
+                        zone_name=payload.get("zone_name"),
+                        metadata=metadata,
+                    )
+                    observation_ids = [observation.observation_id]
+                    association_type = str(payload.get("association_type") or "none")
+                    related_raw_id = (
+                        payload.get("weapon_track_id")
+                        if payload.get("is_person")
+                        else payload.get("person_track_id")
+                    )
+                    related_track_key = self._camera_track_key(camera_id, related_raw_id)
+                    if association_type in {"near", "overlap", "contained"} and related_track_key:
+                        relation, _ = repository.create_or_get(
+                            observation_id=f"{base_id}:association:{related_track_key}",
+                            camera_id=camera_id,
+                            source_epoch=source_epoch,
+                            captured_at=captured_at,
+                            frame_id=frame_id,
+                            track_key=track_key,
+                            related_track_key=related_track_key,
+                            observation_type="object_person_association",
+                            label=association_type,
+                            model_confidence=payload.get("association_score"),
+                            bounding_box=payload.get("bbox"),
+                            zone_id=payload.get("zone_id"),
+                            zone_name=payload.get("zone_name"),
+                            metadata={
+                                **metadata,
+                                "association_type": association_type,
+                                "association_score": payload.get("association_score"),
+                                "weapon_class": payload.get("weapon_class"),
+                            },
+                        )
+                        observation_ids.append(relation.observation_id)
+                    payload["observation_ids"] = observation_ids
+                    payload["observation_persistence_status"] = "persisted"
+            get_persistence_status().record_success("camera_observations")
+        except Exception as exc:
+            for payload in track_payloads:
+                payload["observation_ids"] = []
+                payload["observation_persistence_status"] = "failed"
+            try:
+                from aegis.database.persistence import get_persistence_status
+
+                get_persistence_status().record_failure("camera_observations", exc)
+            except Exception:
+                pass
+            logger.warning("Observation persistence failed camera_id=%s: %s", camera_id, exc)
+
     def _maybe_generate_detection_event(
         self,
         camera_id: str,
@@ -1658,7 +2046,10 @@ class FrameIngestionService:
         verification_status = str(track_payload.get("verification_status") or "confirmed")
         association_type = str(track_payload.get("association_type") or "none")
         risk_level = str(track_payload.get("risk_level") or "LOW")
-        event_key = f"{camera_id}:{track_payload.get('track_id')}:{event_type}:{verification_status}:{association_type}:{risk_level}"
+        if track_payload.get("threat_event_type"):
+            event_key = f"{self._alert_confirmation_key(camera_id, track_payload)}:{verification_status}:{association_type}:{risk_level}"
+        else:
+            event_key = f"{camera_id}:{track_payload.get('track_id')}:{event_type}:{verification_status}:{association_type}:{risk_level}"
         if event_key in self._emitted_detection_events:
             return None
         self._emitted_detection_events.add(event_key)
@@ -1696,6 +2087,8 @@ class FrameIngestionService:
         event_payload = {
             "id": event_id,
             "event_id": event_id,
+            "evidence_id": event_id,
+            "incident_id": None,
             "event_type": event_type,
             "camera_id": camera_id,
             "track_id": track_payload.get("track_id"),
@@ -1726,6 +2119,9 @@ class FrameIngestionService:
             "association_score": track_payload.get("association_score"),
             "stable_frames": track_payload.get("stable_frames"),
             "evidence_objects": track_payload.get("evidence_objects", []),
+            "threat_event_type": track_payload.get("threat_event_type"),
+            "nearby_person_track_id": track_payload.get("nearby_person_track_id"),
+            "threat_context": track_payload.get("threat_context"),
             "detected_objects": [class_name],
             "detected_classes": [class_name],
             "behavior_labels": [],
@@ -1742,6 +2138,8 @@ class FrameIngestionService:
         return event_payload
 
     def _detection_event_type(self, track_payload: Dict[str, Any]) -> str:
+        if track_payload.get("threat_event_type"):
+            return str(track_payload["threat_event_type"])
         if track_payload.get("is_weapon"):
             return "weapon_detected"
         if track_payload.get("is_vehicle"):
@@ -1761,28 +2159,40 @@ class FrameIngestionService:
         risk_level = track_payload["risk_level"]
         risk_score = float(track_payload["risk_score"])
         track_key = str(track_payload["track_id"])
+        confirmation_key = self._alert_confirmation_key(camera_id, track_payload)
 
         verification_status = str(track_payload.get("verification_status", "needs_verification"))
         reason_codes = set(track_payload.get("reason_codes") or [])
-        critical_reason_codes = {"STABLE_WEAPON_PERSON_ASSOCIATION", "EXPLICIT_CRITICAL_SIGNAL"}
+        critical_reason_codes = {
+            "EXPLICIT_CRITICAL_SIGNAL",
+            "CRITICAL_WEAPON_AGGRESSION_COMBINATION",
+        }
         high_reason_codes = critical_reason_codes | {"ZONE_INTRUSION", "CONFIRMED_MULTI_SIGNAL_RISK"}
-        high_reason_codes.add("WEAPON_NEAR_PERSON_STABLE")
+        high_reason_codes.update({
+            "WEAPON_NEAR_PERSON_STABLE",
+            "STABLE_WEAPON_PERSON_ASSOCIATION",
+            "POSSIBLE_ARMED_THREAT",
+            "CONFIRMED_AGGRESSION_PATTERN",
+            "HIGH_CONFIDENCE_WEAPON_ASSOCIATION",
+        })
 
         if verification_status not in {"confirmed", "critical"}:
-            self._high_risk_frames[track_key] = 0
+            self._high_risk_frames[confirmation_key] = 0
             return None
         if risk_level not in {"HIGH", "CRITICAL"}:
-            self._high_risk_frames[track_key] = 0
+            self._high_risk_frames[confirmation_key] = 0
             return None
         if risk_level == "HIGH" and not (reason_codes & high_reason_codes):
-            self._high_risk_frames[track_key] = 0
+            self._high_risk_frames[confirmation_key] = 0
             return None
         if risk_level == "CRITICAL" and not (reason_codes & critical_reason_codes):
-            self._high_risk_frames[track_key] = 0
+            self._high_risk_frames[confirmation_key] = 0
             return None
 
-        self._high_risk_frames[track_key] = self._high_risk_frames.get(track_key, 0) + 1
-        if self._high_risk_frames[track_key] < 3:
+        self._high_risk_frames[confirmation_key] = self._high_risk_frames.get(confirmation_key, 0) + 1
+        threat_context = track_payload.get("threat_context") or {}
+        required_frames = 1 if threat_context and verification_status in {"confirmed", "critical"} else 3
+        if self._high_risk_frames[confirmation_key] < required_frames:
             return None
 
         alert_manager = self._get_alert_manager()
@@ -1795,21 +2205,53 @@ class FrameIngestionService:
                 message=track_payload["risk_explanation"],
                 zone=camera_id,
                 factors=track_payload["risk_factors"],
+                cooldown_key=confirmation_key,
             )
             if alert is None:
                 return None
+        else:
+            current_time = time.monotonic()
+            last_alert_time = self._fallback_alert_cooldowns.get(confirmation_key)
+            if last_alert_time is not None and current_time - last_alert_time < 30.0:
+                return None
+            self._fallback_alert_cooldowns[confirmation_key] = current_time
 
-        snapshot_path = self._save_event_snapshot(camera_id, frame_number, frame)
         event_id = alert.event_id if alert else f"{camera_id}-{frame_number}-{uuid.uuid4().hex[:8]}"
+        snapshot = self._save_event_snapshot(
+            camera_id=camera_id,
+            event_id=event_id,
+            timestamp=timestamp,
+            frame=frame,
+        )
+        related_track_ids: List[str] = []
+        for related_track_id in (
+            track_payload.get("weapon_track_id"),
+            track_payload.get("nearby_person_track_id"),
+        ):
+            if related_track_id is None:
+                continue
+            related_key = f"{camera_id}:{related_track_id}"
+            if related_key != track_key and related_key not in related_track_ids:
+                related_track_ids.append(related_key)
         event_payload = {
             "id": event_id,
             "event_id": event_id,
+            "evidence_id": None,
+            "observation_ids": list(track_payload.get("observation_ids") or []),
+            "observation_persistence_status": track_payload.get("observation_persistence_status"),
+            "evidence_status": "pending",
+            "incident_id": None,
+            # AlertManager exposes one externally assigned alert/event ID.
+            # Retain it in both fields so API consumers can trace either
+            # identifier without inventing a second identity scheme.
+            "alert_id": alert.event_id if alert else None,
             # This marker makes the operational context distinguish confirmed
             # risk alerts from ordinary detection events without changing risk
             # scoring or alert-trigger behaviour.
             "type": "risk_alert",
             "event_type": "risk_alert",
             "camera_id": camera_id,
+            "camera_name": track_payload.get("camera_name"),
             "track_id": track_key,
             "timestamp": timestamp.isoformat(),
             "severity": risk_level,
@@ -1817,6 +2259,7 @@ class FrameIngestionService:
             "risk_score": risk_score,
             "confidence": track_payload.get("confidence"),
             "object_class": track_payload["class_name"],
+            "bbox": track_payload.get("bbox"),
             "detected_objects": track_payload["detected_classes"],
             "detected_classes": track_payload["detected_classes"],
             "behavior_labels": track_payload["behavior_labels"],
@@ -1833,6 +2276,10 @@ class FrameIngestionService:
             "association_score": track_payload.get("association_score"),
             "stable_frames": track_payload.get("stable_frames"),
             "evidence_objects": track_payload.get("evidence_objects", []),
+            "threat_event_type": track_payload.get("threat_event_type"),
+            "nearby_person_track_id": track_payload.get("nearby_person_track_id"),
+            "related_track_ids": related_track_ids,
+            "threat_context": track_payload.get("threat_context"),
             "explanation": track_payload["risk_explanation"],
             "description": track_payload["risk_explanation"],
             "reason": track_payload["risk_explanation"],
@@ -1842,14 +2289,43 @@ class FrameIngestionService:
             "class_name": track_payload["class_name"],
             "frame_number": frame_number,
             "frame_id": frame_number,
-            "snapshot_path": snapshot_path,
-            "confirmed_frames": self._high_risk_frames[track_key],
-            "title": f"{risk_level} risk confirmed",
-            "zone": camera_id,
+            "snapshot_path": snapshot.path,
+            "snapshot_status": snapshot.status,
+            "clip_path": None,
+            "confirmed_frames": max(
+                self._high_risk_frames[confirmation_key],
+                int(threat_context.get("confirmed_frames") or 0),
+            ),
+            "title": self._alert_title(track_payload, risk_level),
+            "zone": track_payload.get("zone_name") or camera_id,
+            "zone_id": track_payload.get("zone_id"),
+            "zone_name": track_payload.get("zone_name"),
         }
+        persisted = self._persist_event(event_payload)
+        if persisted:
+            event_payload["evidence_id"] = event_payload.get("evidence_id") or event_id
+            event_payload["evidence_status"] = "persisted"
+            persist_alert = getattr(alert_manager, "persist_alert", None)
+            if alert is not None and callable(persist_alert):
+                alert_persisted = persist_alert(
+                    alert,
+                    event_id=event_id,
+                    cooldown_key=confirmation_key,
+                )
+                event_payload["alert_persistence_status"] = "persisted" if alert_persisted else "failed"
+            elif alert is not None:
+                # Keep ingestion resilient when an embedding supplies only the
+                # legacy in-memory alert interface. The production manager
+                # always implements durable persistence.
+                event_payload["alert_persistence_status"] = "unavailable"
+        else:
+            event_payload["evidence_id"] = None
+            event_payload["incident_id"] = None
+            event_payload["evidence_status"] = "failed"
+            event_payload["alert_persistence_status"] = "unavailable"
         self._events.append(event_payload)
         get_state().add_event(event_payload)
-        self._persist_event(event_payload)
+        self._publish_confirmed_alert(event_payload)
         with self._lock:
             self._total_alerts += 1
             if risk_level in {"HIGH", "CRITICAL"}:
@@ -1864,38 +2340,152 @@ class FrameIngestionService:
         )
         return event_payload
 
-    def _save_event_snapshot(self, camera_id: str, frame_number: int, frame: np.ndarray) -> Optional[str]:
+    @staticmethod
+    def _publish_confirmed_alert(event: Dict[str, Any]) -> None:
+        """Publish a finalized alert copy to the cross-process event stream.
+
+        APIState remains the low-latency local UI source.  The Redis stream is
+        a durable integration signal for other in-scope consumers and is
+        intentionally published only after AlertManager approval and evidence
+        persistence have completed.  A stream outage never blocks detection.
+        """
+        try:
+            from aegis.core.events import get_event_bus
+
+            # JSON round-tripping removes numpy/datetime values that msgpack
+            # deployments cannot serialize, and prevents fallback streams from
+            # mutating the APIState payload with their internal timestamp.
+            stream_event = json.loads(json.dumps(dict(event), default=str))
+            get_event_bus().publish("events", stream_event)
+        except Exception as exc:
+            logger.warning(
+                "Confirmed alert event-stream publish failed event_id=%s: %s",
+                event.get("event_id"),
+                type(exc).__name__,
+            )
+
+    def _alert_confirmation_key(self, camera_id: str, track_payload: Dict[str, Any]) -> str:
+        event_type = str(track_payload.get("threat_event_type") or "risk_alert")
+        armed_track_id = str(
+            track_payload.get("person_track_id")
+            or track_payload.get("raw_track_id")
+            or track_payload.get("track_id")
+            or "untracked"
+        )
+        nearby_track_id = str(track_payload.get("nearby_person_track_id") or "none")
+        if event_type == "possible_assault" and nearby_track_id != "none":
+            armed_track_id, nearby_track_id = sorted((armed_track_id, nearby_track_id))
+        # Weapon IDs are deliberately evidence, not cooldown identity. Small
+        # objects are prone to tracker-ID churn and base/custom detectors may
+        # observe the same object; the armed-person context must remain one
+        # alert within the cooldown window.
+        return ":".join((str(camera_id), event_type, armed_track_id, nearby_track_id))
+
+    @staticmethod
+    def _alert_title(track_payload: Dict[str, Any], risk_level: str) -> str:
+        threat_event_type = str(track_payload.get("threat_event_type") or "")
+        if threat_event_type == "possible_armed_threat":
+            return "Possible armed threat"
+        if threat_event_type == "possible_assault":
+            return "Possible assault"
+        return f"{risk_level} risk confirmed"
+
+    def _save_event_snapshot(
+        self,
+        camera_id: str,
+        event_id: str,
+        timestamp: datetime,
+        frame: np.ndarray,
+    ) -> EventSnapshot:
+        """Write exactly one compressed keyframe for an accepted alert.
+
+        Frame capture happens only after the existing alert manager and its
+        cooldown approve a HIGH/CRITICAL alert.  It is intentionally not part
+        of normal per-frame detection persistence.
+        """
         try:
             snapshot_dir = Path("data/output/snapshots")
             snapshot_dir.mkdir(parents=True, exist_ok=True)
-            path = snapshot_dir / f"{camera_id}_{frame_number}_{uuid.uuid4().hex[:8]}.jpg"
-            if cv2.imwrite(str(path), frame):
-                return str(path)
+            safe_camera_id = re.sub(r"[^A-Za-z0-9_-]+", "-", str(camera_id)).strip("-_") or "camera"
+            safe_event_id = re.sub(r"[^A-Za-z0-9_-]+", "-", str(event_id)).strip("-_") or "event"
+            timestamp_token = timestamp.strftime("%Y%m%dT%H%M%S%fZ")
+            filename = f"{safe_camera_id[:80]}_{safe_event_id[:128]}_{timestamp_token}.jpg"
+            path = snapshot_dir / filename
+            if cv2.imwrite(str(path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85]):
+                return EventSnapshot(path=path.as_posix(), status="saved")
+            logger.warning("Failed to encode event snapshot for event_id=%s", event_id)
         except Exception as exc:
-            logger.warning("Failed to save event snapshot: %s", exc)
-        return None
+            logger.warning("Failed to save event snapshot event_id=%s: %s", event_id, exc)
+        return EventSnapshot(path=None, status="failed")
 
-    def _persist_event(self, event: Dict[str, Any]) -> None:
+    def _persist_event(self, event: Dict[str, Any]) -> bool:
         try:
             from aegis.database.connection import get_db_session
             from aegis.database.persistence import get_persistence_status
-            from aegis.database.repositories import EventRepository
+            from aegis.database.repositories import (
+                EventRepository,
+                ObservationRepository,
+                RiskAssessmentRepository,
+            )
 
             raw_track_id = str(event.get("track_id", "")).split(":")[-1]
             track_id = int(raw_track_id) if raw_track_id.isdigit() else None
             with get_db_session() as session:
-                EventRepository(session).create(
+                persisted_event, created = EventRepository(session).create_or_get_evidence(
+                    event_id=str(event["event_id"]),
                     event_type="risk_alert",
                     message=event["explanation"],
                     timestamp=datetime.fromisoformat(event["timestamp"]),
                     track_id=track_id,
+                    track_key=event.get("track_id"),
+                    alert_id=event.get("alert_id"),
+                    camera_id=event.get("camera_id"),
+                    camera_name=event.get("camera_name"),
+                    object_class=event.get("object_class") or event.get("class_name"),
                     risk_level=event["risk_level"],
                     risk_score=event["risk_score"],
                     factors=event.get("factors", []),
-                    zone=event.get("camera_id"),
+                    zone=event.get("zone"),
+                    zone_id=event.get("zone_id"),
+                    zone_name=event.get("zone_name"),
+                    bounding_box=event.get("bbox") or event.get("visual_evidence", {}).get("bbox"),
+                    reason=event.get("reason") or event["explanation"],
+                    snapshot_path=event.get("snapshot_path"),
+                    snapshot_status=event.get("snapshot_status") or "unavailable",
+                    clip_path=event.get("clip_path"),
                     metadata=event,
                 )
+                ObservationRepository(session).attach_to_event(
+                    list(event.get("observation_ids") or []),
+                    persisted_event.event_id,
+                )
+                # Correlation is a best-effort enrichment of already durable
+                # evidence.  A failed incident write must never roll back the
+                # alert evidence or interrupt the camera pipeline.
+                try:
+                    from aegis.intelligence.incident_correlation import IncidentCorrelationService
+
+                    with session.begin_nested():
+                        incident = IncidentCorrelationService(session).correlate_event(persisted_event)
+                    if incident is not None:
+                        event["incident_id"] = incident.incident_id
+                        from aegis.intelligence.risk_assessment import persist_assessment
+
+                        assessment, _ = persist_assessment(
+                            RiskAssessmentRepository(session), incident, persisted_event
+                        )
+                        event["risk_assessment_id"] = assessment.assessment_id
+                except Exception as correlation_error:
+                    logger.warning(
+                        "Incident correlation failed for event_id=%s: %s",
+                        event["event_id"],
+                        correlation_error,
+                    )
+                event["evidence_id"] = persisted_event.event_id
             get_persistence_status().record_success("camera_ingestion")
+            if not created:
+                logger.info("Skipped duplicate durable evidence event_id=%s", event["event_id"])
+            return True
         except Exception as exc:
             # Camera ingestion remains non-blocking, but the operational view
             # must expose the failed durable write as degraded.
@@ -1906,6 +2496,7 @@ class FrameIngestionService:
             except Exception:
                 pass
             logger.warning("Event repository persistence failed: %s", exc)
+            return False
 
     def _frame_explanation(self, tracks: List[Dict[str, Any]]) -> str:
         if not tracks:
@@ -2013,6 +2604,7 @@ class MultiCameraPipelineManager:
         was_running = old_source.is_running if old_source else False
         if old_source:
             old_source.stop()
+        self._reset_ingestion_camera(camera_id)
 
         data = existing.to_private_dict()
         data.update({key: value for key, value in changes.items() if value is not None})
@@ -2036,6 +2628,7 @@ class MultiCameraPipelineManager:
             deleted = self.registry.delete(camera_id)
         if source:
             source.stop()
+        self._reset_ingestion_camera(camera_id)
         return deleted or source is not None
 
     def get_source(self, camera_id: str) -> Optional[BaseCameraSource]:
@@ -2058,7 +2651,13 @@ class MultiCameraPipelineManager:
         if source is None:
             raise KeyError(camera_id)
         source.stop()
+        self._reset_ingestion_camera(camera_id)
         return self._camera_payload(source)
+
+    def _reset_ingestion_camera(self, camera_id: str) -> None:
+        reset = getattr(self.ingestion, "reset_camera", None)
+        if callable(reset):
+            reset(camera_id)
 
     def get_status(self, camera_id: str) -> Dict[str, Any]:
         source = self.get_source(camera_id)

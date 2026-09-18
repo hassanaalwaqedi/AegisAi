@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2, MonitorX, Radio } from "lucide-react";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { CameraStatusBadge } from "@/components/cameras/camera-status-badge";
-import { resolveCameraWebSocketUrl } from "@/lib/config";
+import { createAuthenticatedWebSocket, resolveCameraWebSocketUrl } from "@/lib/config";
 import { cameraWebSocketMessageSchema } from "@/lib/schemas";
 import type { Camera } from "@/types";
 
@@ -19,33 +19,47 @@ export function CameraPreview({ camera }: { camera?: Camera }) {
   const timerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    setFrame("");
-    setMessage("");
+    const resetTimer = window.setTimeout(() => {
+      setFrame("");
+      setMessage("");
+    }, 0);
     if (!camera) {
-      setSocketState("idle");
-      return undefined;
+      const idleTimer = window.setTimeout(() => setSocketState("idle"), 0);
+      return () => {
+        window.clearTimeout(resetTimer);
+        window.clearTimeout(idleTimer);
+      };
     }
 
     const url = resolveCameraWebSocketUrl(camera.camera_id, "frames");
     if (!url) {
-      setSocketState("unavailable");
-      setMessage("live stream endpoint unavailable");
-      return undefined;
+      const unavailableTimer = window.setTimeout(() => {
+        setSocketState("unavailable");
+        setMessage("Live stream is temporarily unavailable.");
+      }, 0);
+      return () => {
+        window.clearTimeout(resetTimer);
+        window.clearTimeout(unavailableTimer);
+      };
     }
 
     let socket: WebSocket | undefined;
     closedRef.current = false;
     retryRef.current = 0;
 
-    function connect() {
+    async function connect() {
       if (closedRef.current) return;
       setSocketState(retryRef.current > 0 ? "reconnecting" : "connecting");
 
       try {
-        socket = new WebSocket(url);
+        socket = await createAuthenticatedWebSocket(url);
+        if (closedRef.current) {
+          socket.close();
+          return;
+        }
       } catch {
         setSocketState("unavailable");
-        setMessage("live stream endpoint unavailable");
+        setMessage("Live stream is temporarily unavailable.");
         return;
       }
 
@@ -58,7 +72,7 @@ export function CameraPreview({ camera }: { camera?: Camera }) {
         const parsed = cameraWebSocketMessageSchema.safeParse(JSON.parse(event.data));
         if (!parsed.success) {
           setSocketState("error");
-          setMessage("Camera frame message failed frontend validation.");
+          setMessage("A live image update could not be read.");
           return;
         }
 
@@ -68,30 +82,27 @@ export function CameraPreview({ camera }: { camera?: Camera }) {
           return;
         }
 
-        if (parsed.data.message) {
-          setMessage(parsed.data.message);
-        } else if (parsed.data.error_message) {
-          setMessage(parsed.data.error_message);
-        }
+        if (parsed.data.message || parsed.data.error_message) setMessage("Live stream needs attention.");
       };
 
       socket.onerror = () => {
         setSocketState("unavailable");
-        setMessage("live stream endpoint unavailable");
+        setMessage("Live stream is temporarily unavailable.");
       };
 
       socket.onclose = () => {
         if (closedRef.current) return;
         setSocketState("reconnecting");
         retryRef.current += 1;
-        timerRef.current = window.setTimeout(connect, Math.min(15000, 1000 * 2 ** retryRef.current));
+        timerRef.current = window.setTimeout(() => void connect(), Math.min(15000, 1000 * 2 ** retryRef.current));
       };
     }
 
-    connect();
+    void connect();
 
     return () => {
       closedRef.current = true;
+      window.clearTimeout(resetTimer);
       if (timerRef.current) window.clearTimeout(timerRef.current);
       socket?.close();
     };
@@ -122,13 +133,20 @@ export function CameraPreview({ camera }: { camera?: Camera }) {
             )}
             <div>
               <p className="text-sm font-medium text-slate-200">
-                {camera ? message || "Waiting for a real frame from the backend." : "No camera selected"}
+                {camera ? message || "Waiting for a live image." : "No camera selected"}
               </p>
-              {camera ? <p className="mt-1 text-xs uppercase tracking-[0.16em] text-slate-500">{socketState}</p> : null}
+              {camera ? <p className="mt-1 text-xs uppercase tracking-[0.16em] text-slate-500">{streamStateLabel(socketState)}</p> : null}
             </div>
           </div>
         )}
       </div>
     </Card>
   );
+}
+
+function streamStateLabel(state: SocketState) {
+  if (state === "connected") return "Live";
+  if (state === "connecting" || state === "reconnecting") return "Connecting";
+  if (state === "unavailable" || state === "error") return "Unavailable";
+  return "Waiting";
 }
