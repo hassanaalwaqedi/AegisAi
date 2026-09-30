@@ -41,6 +41,6 @@ describe("Gemini Live browser contracts", () => {
     vi.stubEnv("NEXT_PUBLIC_WS_URL", "");
     vi.stubGlobal("window", { location: { origin: "http://localhost:3001" } });
 
-    expect(liveWebSocketUrl("voice-session")).toBe("ws://localhost:8080/ws/intelligence/live/voice-session");
+    expect(liveWebSocketUrl("voice-session")).toBe("ws://127.0.0.1:8080/ws/intelligence/live/voice-session");
   });
 });

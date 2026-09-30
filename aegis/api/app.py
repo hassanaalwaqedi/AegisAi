@@ -331,12 +331,45 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
             from aegis.pipeline.startup import create_pipeline
             from aegis.settings import get_settings
             settings = get_settings()
-            create_pipeline(
+            pipeline = create_pipeline(
                 model_path=settings.detection.model_path,
                 confidence=settings.detection.confidence_threshold,
                 device=settings.get_device_string(),
                 auto_start=_env_enabled("AEGIS_PIPELINE_AUTOSTART", default=False),
                 warm_model=_env_enabled("AEGIS_PIPELINE_WARM_MODEL", default=True),
+            )
+            # Publish facts from the actual preloaded detector rather than the
+            # configured path. The camera ingestion path later publishes the
+            # same schema when it creates its own detector facade.
+            detection_info = pipeline._stages[0].get_model_info()
+            capabilities = detection_info
+            get_state().update_status(
+                model_name=capabilities.get("model_name"),
+                supported_classes=capabilities.get("supported_classes"),
+                weapon_detection_supported=capabilities.get("weapon_detection_supported"),
+                person_detector=capabilities.get("person_detector"),
+                weapon_detector=capabilities.get("weapon_detector"),
+                threat_detector=capabilities.get("threat_detector"),
+            )
+            general = capabilities.get("general_detector", {})
+            weapon = capabilities.get("weapon_detector", {}).get("runtime", {})
+            threat = capabilities.get("threat_detector", {}).get("runtime", {})
+            logger.info(
+                "AEGIS VISION RUNTIME | general status=%s model=%s configured=%s task=%s classes=%s device=%s | weapon status=%s reason=%s | threat status=%s model=%s prompt_mode=%s classes=%s frame_skip=%s reason=%s",
+                "READY" if general.get("ready") else "DEGRADED",
+                general.get("model"),
+                general.get("configured_path"),
+                general.get("task"),
+                general.get("class_count"),
+                general.get("device"),
+                "READY" if weapon.get("ready") else "NOT_LOADED",
+                weapon.get("error"),
+                "READY" if threat.get("ready") else "NOT_LOADED",
+                threat.get("model"),
+                threat.get("prompt_mode"),
+                threat.get("class_count"),
+                threat.get("frame_skip"),
+                threat.get("error"),
             )
             logger.info(
                 "AI pipeline initialized (autostart=%s warm_model=%s)",

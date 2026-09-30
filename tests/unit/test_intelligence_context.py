@@ -540,6 +540,7 @@ def test_alerting_stage_persistence_failure_is_recorded(monkeypatch) -> None:
 def test_recent_events_enters_database_session_before_constructing_repository(monkeypatch) -> None:
     """Regression test for passing ``get_db_session()`` itself to a repository."""
     from aegis.ai.tools import get_recent_events
+    from aegis.api import state as runtime_state
     from aegis.database import connection, repositories
     import aegis.pipeline.startup as startup
 
@@ -579,6 +580,11 @@ def test_recent_events_enters_database_session_before_constructing_repository(mo
             ]
 
     monkeypatch.setattr(startup, "get_alerting_stage", lambda: None)
+    monkeypatch.setattr(
+        runtime_state,
+        "get_state",
+        lambda: SimpleNamespace(get_events=lambda _limit: []),
+    )
     monkeypatch.setattr(connection, "get_db_session", lambda: session_context)
     monkeypatch.setattr(repositories, "EventRepository", RecordingRepository)
 

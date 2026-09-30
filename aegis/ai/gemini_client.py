@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 class GeminiConfig:
     """Configuration for Gemini API client."""
     api_key: str
-    model: str = "gemini-2.0-flash-exp"
+    model: str = "gemini-3.6-flash"
     max_tokens: int = 2048
     temperature: float = 0.7
     timeout: int = 30
@@ -100,7 +100,7 @@ class GeminiClient:
         
         return GeminiConfig(
             api_key=api_key,
-            model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp"),
+            model=os.getenv("GEMINI_MODEL", "gemini-3.6-flash"),
             max_tokens=int(os.getenv("GEMINI_MAX_TOKENS", "2048")),
             temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.7")),
         )

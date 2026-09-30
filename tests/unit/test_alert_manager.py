@@ -11,6 +11,7 @@ import time
 from aegis.alerts import (
     AlertManager,
     AlertManagerConfig,
+    AlertChannel,
     AlertLevel,
     Alert
 )
@@ -208,6 +209,22 @@ class TestAlertManager:
         )
         
         assert alert_manager.alert_count == initial_count + 1
+
+    def test_full_legacy_api_queue_keeps_the_newest_alert_deliverable(self):
+        manager = AlertManager(AlertManagerConfig(
+            channels={AlertChannel.API},
+            log_to_file=False,
+            max_alerts_queue=1,
+            cooldown_seconds=0,
+        ))
+
+        first = manager.process_risk(1, "HIGH", 0.7, "First alert")
+        second = manager.process_risk(2, "HIGH", 0.8, "Second alert")
+
+        assert first is not None
+        assert second is not None
+        assert second.delivery_status == "queued"
+        assert manager.get_alerts_for_api() == [second.to_dict()]
     
     def test_get_summary(self, alert_manager):
         """Should return valid summary statistics."""

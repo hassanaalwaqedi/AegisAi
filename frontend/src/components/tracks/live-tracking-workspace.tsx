@@ -124,7 +124,7 @@ export function TrackingObjectList({ items, selected, onSelect }: { items: LiveT
 }
 
 export function TrackingObjectCard({ item, selected, onSelect }: { item: LiveTrackingItem; selected: boolean; onSelect: (id: string) => void }) {
-  return <button type="button" onClick={() => onSelect(item.id)} aria-pressed={selected} className={cn("min-w-[190px] rounded-lg border p-3 text-start transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan", selected ? "border-signal-cyan bg-signal-cyan/[0.09] shadow-[inset_0_0_0_1px_rgba(34,211,238,0.18)]" : "border-white/[0.09] bg-black/15 hover:border-signal-cyan/40")}><span className="flex items-start justify-between gap-3"><span><span className="block text-sm font-semibold text-white">{item.label}</span><span className="mt-1 block text-xs text-slate-400">{item.cameraLabel}</span></span>{item.needsAttention ? <AlertTriangle className="h-4 w-4 shrink-0 text-amber-200" aria-label="Needs attention" /> : null}</span><span className="mt-3 block text-xs text-slate-400">{item.lastSeen ? `Last seen ${relativeTime(item.lastSeen)}` : "Last seen unavailable"}</span></button>;
+  return <button type="button" onClick={() => onSelect(item.id)} aria-pressed={selected} className={cn("min-w-[190px] rounded-lg border p-3 text-start transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-cyan", selected ? "border-signal-cyan bg-signal-cyan/[0.09] shadow-[inset_0_0_0_1px_rgba(34,211,238,0.18)]" : "border-white/[0.09] bg-black/15 hover:border-signal-cyan/40")}><span className="flex items-start justify-between gap-3"><span><span className="block text-sm font-semibold text-white">{item.label}</span><span className="mt-1 block text-xs text-slate-400">{item.cameraLabel}</span></span>{item.needsAttention ? <AlertTriangle className="h-4 w-4 shrink-0 text-amber-200" aria-label="Needs attention" /> : null}</span><span className="mt-2 block text-xs text-slate-300">{item.behaviorLabel}</span><span className="mt-2 block text-xs text-slate-400">{item.lastSeen ? `Last seen ${relativeTime(item.lastSeen)}` : "Last seen unavailable"}</span></button>;
 }
 
 function CameraViewCard({ item, selected, onSelect }: { item: LiveTrackingItem; selected: boolean; onSelect: (id: string) => void }) {
@@ -298,6 +298,8 @@ function diagnosticRows(item: LiveTrackingItem) {
   add("Track reference", item.track.track_id);
   add("Camera reference", item.cameraId);
   add("Activity type", item.track.class_name);
+  add("Observed behavior", item.behaviorLabel);
+  add("Measured movement", item.movementLabel);
   add("Risk level", item.track.risk_level);
   add("Risk score", item.track.risk_score);
   add("First seen", item.firstSeen);

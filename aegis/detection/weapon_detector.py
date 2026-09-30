@@ -182,7 +182,39 @@ class WeaponDetector:
                 if self._class_mapping_validated
                 else "configured_not_loaded"
             ),
+            "runtime": self.get_runtime_metadata(),
         }
+
+    def get_runtime_metadata(self) -> dict:
+        path = Path(self._model_path)
+        metadata = {
+            "backend": "ultralytics-yolo",
+            "configured": bool(self._model_path),
+            "configured_path": self._model_path,
+            "resolved_path": str(path.resolve()),
+            "model": path.name,
+            "ready": False,
+            "task": None,
+            "class_count": 0,
+            "classes": [],
+            "device": None,
+            "error": self._disabled_reason or (None if path.is_file() else f"Weapon detector weights are unavailable: {path}"),
+        }
+        if self._model is None:
+            return metadata
+        names = getattr(self._model, "names", {})
+        names = list(names.values()) if isinstance(names, dict) else list(names or [])
+        metadata.update({
+            "resolved_path": str(Path(getattr(self._model, "ckpt_path", path)).resolve()),
+            "model": Path(getattr(self._model, "ckpt_path", path)).name,
+            "ready": True,
+            "task": getattr(self._model, "task", None),
+            "class_count": len(names),
+            "classes": names,
+            "device": str(getattr(self._model, "device", self._device or "auto")),
+            "error": None,
+        })
+        return metadata
 
     def __repr__(self) -> str:
         return f"WeaponDetector(model={self._model_path}, classes={self._class_names})"

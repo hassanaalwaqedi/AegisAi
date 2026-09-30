@@ -8,6 +8,9 @@ import { getErrorMessage } from "@/lib/errors";
 import { useBrowserFrameMutation } from "@/hooks/use-aegis-api";
 import type { Camera, Track } from "@/types";
 
+const ANALYSIS_INTERVAL_MS = 200;
+const ANALYSIS_MAX_WIDTH = 640;
+
 export function BrowserWebcamCapture({ camera }: { camera?: Camera }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -65,13 +68,14 @@ export function BrowserWebcamCapture({ camera }: { camera?: Camera }) {
       const height = video.videoHeight;
       if (!width || !height) return;
 
-      canvas.width = width;
-      canvas.height = height;
+      const scale = Math.min(1, ANALYSIS_MAX_WIDTH / width);
+      canvas.width = Math.round(width * scale);
+      canvas.height = Math.round(height * scale);
       const context = canvas.getContext("2d");
       if (!context) return;
 
-      context.drawImage(video, 0, 0, width, height);
-      const frame = canvas.toDataURL("image/jpeg", 0.82);
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const frame = canvas.toDataURL("image/jpeg", 0.72);
       processingRef.current = true;
       browserFrame.mutate(
         { cameraId: camera.camera_id, frame },
@@ -81,7 +85,7 @@ export function BrowserWebcamCapture({ camera }: { camera?: Camera }) {
           }
         }
       );
-    }, 900);
+    }, ANALYSIS_INTERVAL_MS);
 
     return () => window.clearInterval(timer);
   }, [browserFrame, camera, capturing]);

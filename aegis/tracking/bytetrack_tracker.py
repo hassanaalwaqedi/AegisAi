@@ -48,6 +48,8 @@ class Track(NamedTuple):
     is_animal: bool = False
     model_source: str = ""
     source_class_id: Optional[int] = None
+    detector: str = "general_yolo"
+    evidence_type: str = "general_detection"
 
 
 class ByteTrackTracker(BaseTracker):
@@ -114,6 +116,8 @@ class ByteTrackTracker(BaseTracker):
                 "is_animal": getattr(det, "is_animal", False),
                 "model_source": getattr(det, "model_source", ""),
                 "source_class_id": getattr(det, "source_class_id", None),
+                "detector": getattr(det, "detector", "general_yolo"),
+                "evidence_type": getattr(det, "evidence_type", "general_detection"),
             })
 
         sv_dets = sv.Detections(
@@ -158,6 +162,8 @@ class ByteTrackTracker(BaseTracker):
                     is_animal=stored.get("is_animal", False),
                     model_source=stored.get("model_source", ""),
                     source_class_id=stored.get("source_class_id"),
+                    detector=stored.get("detector", "general_yolo"),
+                    evidence_type=stored.get("evidence_type", "general_detection"),
                 ))
 
         logger.debug(f"Active tracks: {len(tracks)}")

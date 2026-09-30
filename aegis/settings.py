@@ -42,7 +42,7 @@ class DetectionSettings(BaseSettings):
     """YOLO Detection Configuration."""
 
     model_path: str = Field(
-        "yolo11n.pt",
+        "/app/models/yolo11n.pt",
         description="Path to YOLO model weights",
         validation_alias="AEGIS_DETECTION_MODEL_PATH",
     )
@@ -75,6 +75,35 @@ class DetectionSettings(BaseSettings):
         validation_alias="AEGIS_WEAPON_INTERNAL_CLASS_IDS_JSON",
     )
     weapon_debug_enabled: bool = True
+    weapon_detector_enabled: bool = Field(True, validation_alias="AEGIS_WEAPON_DETECTOR_ENABLED")
+
+    # YOLOE is an independent, open-vocabulary threat-evidence source. It is
+    # separate from the general detector and stays disabled until local assets
+    # have been provisioned explicitly.
+    threat_detector_enabled: bool = Field(False, validation_alias="AEGIS_THREAT_DETECTOR_ENABLED")
+    threat_detector_backend: Literal["yoloe"] = Field("yoloe", validation_alias="AEGIS_THREAT_DETECTOR_BACKEND")
+    threat_model_path: str = Field("/app/models/yoloe-26n-seg.pt", validation_alias="AEGIS_THREAT_MODEL_PATH")
+    threat_prompt_embeddings_path: str = Field(
+        "/app/models/yoloe-26n-seg.threat-prompts.npz",
+        validation_alias="AEGIS_THREAT_PROMPT_EMBEDDINGS_PATH",
+    )
+    threat_classes: Tuple[str, ...] = Field(
+        ("handgun", "pistol", "revolver", "rifle", "shotgun", "knife", "machete", "baseball bat", "crowbar"),
+        validation_alias="AEGIS_THREAT_CLASSES_JSON",
+    )
+    threat_confidence_threshold: float = Field(
+        0.35, ge=0.0, le=1.0, validation_alias="AEGIS_THREAT_CONFIDENCE_THRESHOLD"
+    )
+    threat_frame_skip: int = Field(3, ge=1, validation_alias="AEGIS_THREAT_FRAME_SKIP")
+    # Phase 5 evidence-only fusion. These values affect attribution metadata,
+    # never risk thresholds or alert severity.
+    threat_fusion_enabled: bool = Field(True, validation_alias="AEGIS_THREAT_FUSION_ENABLED")
+    threat_dedup_iou_threshold: float = Field(0.55, ge=0.0, le=1.0, validation_alias="AEGIS_THREAT_DEDUP_IOU_THRESHOLD")
+    threat_person_expansion_ratio: float = Field(0.25, ge=0.0, le=1.0, validation_alias="AEGIS_THREAT_PERSON_EXPANSION_RATIO")
+    threat_association_min_score: float = Field(0.45, ge=0.0, le=1.0, validation_alias="AEGIS_THREAT_ASSOCIATION_MIN_SCORE")
+    threat_association_winner_margin: float = Field(0.08, ge=0.0, le=1.0, validation_alias="AEGIS_THREAT_ASSOCIATION_WINNER_MARGIN")
+    threat_evidence_ttl_frames: int = Field(9, ge=1, validation_alias="AEGIS_THREAT_EVIDENCE_TTL_FRAMES")
+    threat_continuity_bonus: float = Field(0.08, ge=0.0, le=0.25, validation_alias="AEGIS_THREAT_CONTINUITY_BONUS")
 
     # Animal classes for filtering false positives (COCO: bird, cat, dog)
     animal_classes: Tuple[int, ...] = (14, 15, 16)
@@ -338,7 +367,7 @@ class GeminiSettings(BaseSettings):
     """Google Gemini LLM Configuration."""
 
     api_key: str = Field(default="", description="Gemini API key")
-    model: str = "gemini-2.0-flash-exp"
+    model: str = "gemini-3.6-flash"
     max_tokens: int = 2048
     temperature: float = 0.7
     timeout: int = 30
@@ -359,7 +388,7 @@ class GeminiLiveSettings(BaseSettings):
     enabled: bool = False
     # These are current Gemini Live defaults. Operators can replace either
     # value through the corresponding GEMINI_LIVE_* environment variable.
-    model: str = "gemini-3.1-flash-live-preview"
+    model: str = "gemini-3.8-live"
     # Kore is the established Aegis Live voice. This may be overridden with
     # GEMINI_LIVE_VOICE.
     voice: str = "Kore"
@@ -368,6 +397,7 @@ class GeminiLiveSettings(BaseSettings):
     # native audio without guessing a format.
     input_sample_rate: int = Field(default=16_000, ge=8_000, le=48_000)
     output_sample_rate: int = Field(default=24_000, ge=8_000, le=48_000)
+    connect_timeout_seconds: int = Field(default=12, ge=3, le=60)
     session_ttl_seconds: int = Field(default=120, ge=30, le=900)
     max_session_seconds: int = Field(default=900, ge=60, le=900)
     tool_audit_retention_seconds: int = Field(default=3600, ge=0, le=86_400)

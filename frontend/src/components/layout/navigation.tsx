@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Link, usePathname } from "@/i18n/routing";
 import { BarChart3, Binary, BrainCircuit, Camera, Cctv, RadioTower, Search } from "lucide-react";
@@ -19,12 +20,30 @@ const navItems = [
 export function Navigation() {
   const pathname = usePathname();
   const t = useTranslations("navigation");
+  const [engagedDomain, setEngagedDomain] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleDomainFocus = (event: Event) => {
+      const detail = (event as CustomEvent<{ domain?: string | null }>).detail;
+      setEngagedDomain(detail?.domain ?? null);
+    };
+    window.addEventListener("aegis:domain-focus", handleDomainFocus);
+    return () => window.removeEventListener("aegis:domain-focus", handleDomainFocus);
+  }, []);
+
+  const engagedHref = engagedDomain === "cameras" ? "/cameras"
+    : engagedDomain === "events" || engagedDomain === "risk" || engagedDomain === "incidents" ? "/events"
+      : engagedDomain === "tracking" ? "/tracks"
+        : engagedDomain === "analytics" ? "/analytics"
+          : engagedDomain === "evidence" || engagedDomain === "semantic" ? "/semantic"
+            : null;
 
   return (
-    <nav className="flex max-w-full gap-1 overflow-hidden rounded-lg border border-white/10 bg-white/[0.04] p-1 lg:max-w-none">
+    <nav className="aegis-nav-rail" aria-label="Primary navigation">
       {navItems.map((item) => {
         const Icon = item.icon;
         const active = pathname === item.href;
+        const engaged = engagedHref === item.href;
         const label = t(item.labelKey);
 
         return (
@@ -33,17 +52,19 @@ export function Navigation() {
             href={item.href as any}
             aria-label={label}
             title={label}
+            data-active={active}
+            data-engaged={engaged}
             className={cn(
-              "inline-flex min-h-9 shrink-0 items-center justify-center gap-2 rounded-md px-2.5 text-sm text-slate-300 transition hover:bg-white/10 hover:text-white xl:px-3",
-              active && "bg-signal-cyan/12 text-signal-cyan"
+              "aegis-nav-link",
+              active && "is-active"
             )}
           >
-            <Icon className="h-4 w-4" aria-hidden />
-            <span className="hidden xl:inline">{label}</span>
+            <Icon aria-hidden />
+            <span>{label}</span>
           </Link>
         );
       })}
-      <div className="ms-auto flex items-center border-s border-white/10 ps-1 rtl:border-s-0 rtl:border-e rtl:ps-0 rtl:pe-1">
+      <div className="aegis-nav-language">
         <LanguageSwitcher />
       </div>
     </nav>

@@ -16,6 +16,25 @@ export const voiceStateSchema = z.enum([
 
 export type VoiceState = z.infer<typeof voiceStateSchema>;
 
+/** Browser-side, event-derived state for the hands-free Aegis session. */
+export const aegisVoiceSessionStateSchema = z.enum([
+  "DISABLED",
+  "ACTIVATING",
+  "STANDBY",
+  "WAKE_DETECTED",
+  "LISTENING",
+  "END_OF_SPEECH",
+  "THINKING",
+  "EXECUTING",
+  "SPEAKING",
+  "FOLLOW_UP_WINDOW",
+  "MUTED",
+  "ERROR",
+]);
+
+export type AegisVoiceSessionState = z.infer<typeof aegisVoiceSessionStateSchema>;
+export type WakeWordMode = "browser-recognition" | "session-listening" | "unavailable";
+
 /** Frontend-only presentation state; the backend never needs to emit it. */
 export const aegisVoiceCoreStateSchema = z.union([voiceStateSchema, z.literal("degraded")]);
 
@@ -174,8 +193,11 @@ function liveWebSocketBase() {
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   // Local Next development can choose any available port (for example 3001
   // when 3000 is occupied), while FastAPI serves the Live gateway on 8080.
+  // Use the IPv4 loopback address explicitly: on Windows `localhost` may
+  // resolve to a stale IPv6 listener rather than this local API process.
   // Deployed environments must configure NEXT_PUBLIC_AEGIS_LIVE_WS_URL.
   if (["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) && url.port !== "8080") {
+    url.hostname = "127.0.0.1";
     url.port = "8080";
   }
   return url.toString();

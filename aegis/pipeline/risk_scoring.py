@@ -37,6 +37,13 @@ class RiskScoringStage(PipelineStage):
         self._proximity_engines: Dict[str, Any] = {}
         self._association_engines: Dict[str, Any] = {}
         self._weapon_aggression_engines: Dict[str, Any] = {}
+        self._situation_engines: Dict[str, Any] = {}
+
+    def _get_situation_engine(self, camera_id: str):
+        if camera_id not in self._situation_engines:
+            from aegis.risk.situation_intelligence import SituationIntelligence
+            self._situation_engines[camera_id] = SituationIntelligence()
+        return self._situation_engines[camera_id]
 
     def _get_risk_engine(self, camera_id: str, frame_shape=None, metadata=None):
         """Get or create a risk engine for a camera."""
@@ -305,6 +312,38 @@ class RiskScoringStage(PipelineStage):
                             "threat_context": context_payload,
                     })
 
+                # Phase 6 is the one production decision extension point: it
+                # consumes the existing behavioral score alongside Phase 5
+                # evidence and emits decomposable, temporal assessments.
+                zone_manager = getattr(risk_engine, "zone_manager", None)
+                situation_assessments = self._get_situation_engine(camera_id).assess(
+                    camera_id=camera_id,
+                    tracks=raw_tracks,
+                    threat_evidence=list(msg.get("threat_evidence") or []),
+                    analyses=analysis_by_track,
+                    base_risks={str(item["track_id"]): float(item.get("score", 0.0)) for item in risk_data},
+                    zone_for_track=(lambda track: zone_manager.get_context(bbox=getattr(track, "bbox", None))) if zone_manager else None,
+                )
+                for assessment in situation_assessments:
+                    if assessment.primary_track_id is None:
+                        continue  # scene evidence is exposed below, not attributed to a person.
+                    existing = risk_by_track.get(assessment.primary_track_id)
+                    if existing is None:
+                        existing = {"track_id": assessment.primary_track_id}
+                        risk_data.append(existing)
+                        risk_by_track[assessment.primary_track_id] = existing
+                    existing.update({
+                        "score": assessment.risk_score,
+                        "level": assessment.risk_level,
+                        "is_concerning": assessment.risk_level in {"HIGH", "CRITICAL"},
+                        "explanation": assessment.explanation,
+                        "reason_codes": assessment.reason_codes,
+                        "contributions": [item.to_dict() for item in assessment.contributions],
+                        "related_track_ids": assessment.related_track_ids,
+                        "risk_trend": assessment.risk_trend,
+                        "situation_assessment": assessment.to_dict(),
+                    })
+
                 results.append({
                     "camera_id": camera_id,
                     "frame_id": frame_id,
@@ -324,6 +363,7 @@ class RiskScoringStage(PipelineStage):
                     "_proximity": proximity,
                     "_associations": associations,
                     "_threat_contexts": threat_contexts,
+                    "situation_assessments": [item.to_dict() for item in situation_assessments],
                 })
 
             except Exception as exc:
@@ -342,3 +382,4 @@ class RiskScoringStage(PipelineStage):
         self._proximity_engines.pop(camera_id, None)
         self._association_engines.pop(camera_id, None)
         self._weapon_aggression_engines.pop(camera_id, None)
+        self._situation_engines.pop(camera_id, None)

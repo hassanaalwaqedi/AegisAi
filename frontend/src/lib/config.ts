@@ -19,6 +19,43 @@ type WebSocketTokenResponse = {
   protocol?: unknown;
 };
 
+function localBackendWebSocketBase(): URL | null {
+  if (typeof window === "undefined") return null;
+  const hostname = window.location.hostname;
+  if (!["localhost", "127.0.0.1", "[::1]"].includes(hostname)) return null;
+
+  const base = new URL(window.location.href);
+  base.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  base.hostname = hostname;
+  base.port = "8080";
+  base.pathname = "";
+  base.search = "";
+  return base;
+}
+
+function websocketBase(): URL | null {
+  if (appConfig.wsUrl) {
+    try {
+      const configured = new URL(appConfig.wsUrl);
+      configured.pathname = "";
+      configured.search = "";
+      return configured;
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    const url = new URL(appConfig.apiUrl);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.pathname = "";
+    url.search = "";
+    return url;
+  } catch {
+    return localBackendWebSocketBase();
+  }
+}
+
 /**
  * Obtain an ephemeral backend-issued WebSocket credential. The browser never
  * receives the long-lived AEGIS_API_KEY; the Next server proxy performs that
@@ -42,43 +79,14 @@ export async function createAuthenticatedWebSocket(url: string): Promise<WebSock
 }
 
 export function resolveWebSocketUrl() {
-  if (appConfig.wsUrl) return appConfig.wsUrl;
-
-  try {
-    const url = new URL(appConfig.apiUrl);
-    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    url.pathname = "/ws";
-    url.search = "";
-    return url.toString();
-  } catch {
-    return "";
-  }
+  const base = websocketBase();
+  if (!base) return "";
+  base.pathname = "/ws";
+  return base.toString();
 }
 
 export function resolveCameraWebSocketUrl(cameraId: string, channel: "frames" | "events") {
-  const base = (() => {
-    if (appConfig.wsUrl) {
-      try {
-        const configured = new URL(appConfig.wsUrl);
-        configured.pathname = "";
-        configured.search = "";
-        return configured;
-      } catch {
-        return null;
-      }
-    }
-
-    try {
-      const url = new URL(appConfig.apiUrl);
-      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-      url.pathname = "";
-      url.search = "";
-      return url;
-    } catch {
-      return null;
-    }
-  })();
-
+  const base = websocketBase();
   if (!base) return "";
   base.pathname = `/ws/cameras/${encodeURIComponent(cameraId)}/${channel}`;
   return base.toString();

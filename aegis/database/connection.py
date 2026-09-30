@@ -9,7 +9,7 @@ import logging
 from typing import Optional, Generator
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
 from sqlalchemy.pool import QueuePool
 
@@ -111,7 +111,56 @@ def create_tables():
 
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
+    _upgrade_legacy_event_schema(engine)
     logger.info("Database tables created")
+
+
+def _upgrade_legacy_event_schema(engine) -> None:
+    """Add event evidence fields absent from pre-Phase-4 PostgreSQL installs.
+
+    ``create_all`` intentionally does not modify tables that already exist.
+    That left long-lived Aegis installations with an older ``events`` table,
+    while the intelligence context now reads the newer evidence columns.  The
+    small compatibility upgrade below is deliberately additive: it leaves all
+    existing rows untouched and makes only nullable columns available.  Proper
+    structural migrations should supersede this bridge when Alembic is added.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+
+    event_table = Base.metadata.tables.get("events")
+    if event_table is None:
+        return
+
+    inspector = inspect(engine)
+    if "events" not in inspector.get_table_names():
+        return
+
+    existing_columns = {column["name"] for column in inspector.get_columns("events")}
+    missing_columns = [
+        column
+        for column in event_table.columns
+        if not column.primary_key and column.name not in existing_columns
+    ]
+    if not missing_columns:
+        return
+
+    # Names come from the mapped model rather than external input.  Retaining
+    # the explicit quoting protects reserved physical names such as metadata.
+    with engine.begin() as connection:
+        for column in missing_columns:
+            sql_type = column.type.compile(dialect=engine.dialect)
+            connection.execute(
+                text(
+                    f'ALTER TABLE "events" ADD COLUMN IF NOT EXISTS '
+                    f'"{column.name}" {sql_type}'
+                )
+            )
+
+    logger.warning(
+        "Upgraded legacy events schema with missing evidence columns: %s",
+        ", ".join(column.name for column in missing_columns),
+    )
 
 
 def check_connection() -> bool:

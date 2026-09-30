@@ -6,19 +6,25 @@ import { LoaderCircle, Maximize2, Minimize2, X } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { OperatorResultWorkspace } from "./operator-result-workspace";
 import type { OperatorExecution } from "@/lib/operator-api";
+import type { ProjectionAnchor, ProjectionAnchorName } from "@/lib/operator-runtime";
 
-export function ProjectionLayer({ execution, pending, domain, selectedId, onSelect, onDismiss, onOpen, onFindSimilar, onRelated }: {
+export function ProjectionLayer({ execution, pending, domain, anchor, anchorName, selectedId, onSelect, onDismiss, onOpen, onFindSimilar, onRelated }: {
   execution: OperatorExecution | null; pending: boolean; domain: string | null; selectedId: string | null;
+  anchor: ProjectionAnchor; anchorName: ProjectionAnchorName;
   onSelect: (id: string) => void; onDismiss: () => void; onOpen: (target: string) => void;
   onFindSimilar: (id: string) => void; onRelated: () => void;
 }) {
   const t = useTranslations("intelligence.operator");
   const reduced = useReducedMotion();
   const [expanded, setExpanded] = useState(false);
-  const side = domain === "cameras" || domain === "events" ? "left" : "right";
+  const side = anchorName.includes("left") ? "left" : "right";
+  const anchorStyle = {
+    "--projection-anchor-x": `${anchor.x}%`,
+    "--projection-anchor-y": `${anchor.y}%`,
+  } as React.CSSProperties;
   return <AnimatePresence>
     {(execution || pending) && <motion.aside
-      key="projection" className="cinematic-result-projection" data-side={side} data-expanded={expanded} data-domain={domain}
+      key="projection" className="cinematic-result-projection" data-side={side} data-anchor={anchorName} data-rig-anchor={anchor.fromRig} data-expanded={expanded} data-domain={domain} style={anchorStyle}
       aria-label={t("resultWorkspace")} aria-busy={pending}
       initial={reduced ? false : { opacity: 0, scale: .85, x: side === "left" ? 70 : -70, y: 35 }}
       animate={{ opacity: 1, scale: 1, x: 0, y: 0 }} exit={{ opacity: 0, scale: .95 }}

@@ -2,7 +2,9 @@
 # Python 3.10+ required
 
 # ─── Core AI / Perception ─────────────────────────────────
-ultralytics>=8.0.0
+# YOLOE offline prompt embeddings require the APIs present in 8.4.163.
+# Keep Windows camera tooling and the Docker runtime on the same tested build.
+ultralytics==8.4.163
 supervision>=0.18.0            # ByteTrack tracker (CPU-friendly)
 opencv-python>=4.8.0
 numpy>=1.24.0

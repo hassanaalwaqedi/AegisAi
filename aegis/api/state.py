@@ -16,6 +16,12 @@ from typing import Dict, List, Optional, Any, Union
 from collections import deque
 
 
+# The public tracks endpoints power the live operator view.  A track that has
+# not received an observation within this window is historical, not live, and
+# must not be rendered as current activity.
+ACTIVE_TRACK_MAX_AGE_SECONDS = 15.0
+
+
 @dataclass
 class SystemStatus:
     """
@@ -47,6 +53,7 @@ class SystemStatus:
     weapon_detection_supported: bool = False
     person_detector: Dict[str, Any] = field(default_factory=dict)
     weapon_detector: Dict[str, Any] = field(default_factory=dict)
+    threat_detector: Dict[str, Any] = field(default_factory=dict)
     action_recognition_supported: bool = False
     pose_estimation_supported: bool = False
     semantic_verification_supported: bool = False
@@ -63,12 +70,19 @@ class SystemStatus:
                 for class_id in sorted(set(target_classes))
             ]
             weapon_supported = list(config.weapon_model_class_names.values())
+            # This is only a configured value until an instantiated detector
+            # publishes runtime metadata through ``update_statistics``.
             self.model_name = config.model_path
             self.supported_classes = [*person_supported, *weapon_supported]
             self.weapon_detection_supported = Path(config.weapon_model_path).exists()
             self.person_detector = {
                 "model_name": config.model_path,
                 "supported_classes": person_supported,
+                "runtime": {
+                    "configured_path": config.model_path,
+                    "ready": False,
+                    "error": "Detector has not been instantiated yet",
+                },
             }
             self.weapon_detector = {
                 "model_name": config.weapon_model_path,
@@ -78,6 +92,16 @@ class SystemStatus:
                     for source_id, name in config.weapon_model_class_names.items()
                 },
                 "weapon_detection_supported": self.weapon_detection_supported,
+            }
+            self.threat_detector = {
+                "enabled": config.threat_detector_enabled,
+                "supported_classes": list(config.threat_classes),
+                "runtime": {
+                    "configured_path": config.threat_model_path,
+                    "prompt_embeddings_path": config.threat_prompt_embeddings_path,
+                    "ready": False,
+                    "error": "Threat detector has not been instantiated yet",
+                },
             }
         except Exception:
             pass
@@ -105,6 +129,7 @@ class SystemStatus:
             "weapon_detection_supported": self.weapon_detection_supported,
             "person_detector": self.person_detector,
             "weapon_detector": self.weapon_detector,
+            "threat_detector": self.threat_detector,
             "action_recognition_supported": self.action_recognition_supported,
             "pose_estimation_supported": self.pose_estimation_supported,
             "semantic_verification_supported": self.semantic_verification_supported
@@ -184,6 +209,9 @@ class TrackInfo:
             "risk_score": round(self.risk_score, 3),
             "zone": self.zone,
             "behaviors": self.behaviors,
+            # Keep the same explicit field used by frame/detection payloads so
+            # clients do not have to guess whether behavior information exists.
+            "behavior_labels": self.behaviors,
             "risk_explanation": self.risk_explanation,
             "detected_classes": self.detected_classes,
             "evidence_type": self.evidence_type,
@@ -295,6 +323,7 @@ class APIState:
         weapon_detection_supported: Optional[bool] = None,
         person_detector: Optional[Dict[str, Any]] = None,
         weapon_detector: Optional[Dict[str, Any]] = None,
+        threat_detector: Optional[Dict[str, Any]] = None,
         action_recognition_supported: Optional[bool] = None,
         pose_estimation_supported: Optional[bool] = None,
         semantic_verification_supported: Optional[bool] = None
@@ -340,6 +369,8 @@ class APIState:
                 self._status.person_detector = person_detector
             if weapon_detector is not None:
                 self._status.weapon_detector = weapon_detector
+            if threat_detector is not None:
+                self._status.threat_detector = threat_detector
             if action_recognition_supported is not None:
                 self._status.action_recognition_supported = action_recognition_supported
             if pose_estimation_supported is not None:
@@ -389,8 +420,9 @@ class APIState:
     ) -> None:
         """Update or add a track."""
         with self._lock:
+            observed_at = last_seen or datetime.utcnow().isoformat()
             existing = self._tracks.get(track_id)
-            first_seen = existing.first_seen if existing and existing.first_seen else (last_seen or datetime.now().isoformat())
+            first_seen = existing.first_seen if existing and existing.first_seen else observed_at
             total_seen_count = (existing.total_seen_count if existing else 0) + 1
             confidence_history = list(existing.confidence_history if existing else [])
             if confidence is not None:
@@ -412,7 +444,7 @@ class APIState:
                 risk_level=risk_level,
                 risk_score=risk_score,
                 zone=zone,
-                behaviors=behaviors or [],
+                behaviors=behaviors if behaviors is not None else (existing.behaviors if existing else []),
                 risk_explanation=risk_explanation,
                 detected_classes=detected_classes or [],
                 evidence_type=evidence_type,
@@ -431,7 +463,7 @@ class APIState:
                 vehicle_enrichment=vehicle_enrichment or (existing.vehicle_enrichment if existing else {}),
                 movement_state=movement_state,
                 time_tracked=time_tracked,
-                last_seen=last_seen,
+                last_seen=observed_at,
                 last_updated=datetime.now()
             )
     
@@ -455,6 +487,7 @@ class APIState:
         min_priority = level_priority.get(min_risk_level, 0) if min_risk_level else 0
         
         with self._lock:
+            self._remove_stale_tracks_locked()
             tracks = []
             for track in self._tracks.values():
                 track_priority = level_priority.get(track.risk_level, 0)
@@ -465,6 +498,7 @@ class APIState:
     def get_object_registry(self, camera_id: Optional[str] = None) -> List[dict]:
         """Get active object registry entries, optionally filtered by camera."""
         with self._lock:
+            self._remove_stale_tracks_locked()
             entries = []
             for track in self._tracks.values():
                 if camera_id and track.camera_id != camera_id:
@@ -518,17 +552,21 @@ class APIState:
         with self._lock:
             return self._statistics.copy()
     
-    def cleanup_stale_tracks(self, max_age_seconds: float = 5.0) -> int:
+    def _remove_stale_tracks_locked(self, max_age_seconds: float = ACTIVE_TRACK_MAX_AGE_SECONDS) -> int:
+        """Remove expired live tracks. Caller must hold ``_lock``."""
+        now = datetime.now()
+        stale = [
+            tid for tid, track in self._tracks.items()
+            if (now - track.last_updated).total_seconds() > max_age_seconds
+        ]
+        for tid in stale:
+            del self._tracks[tid]
+        return len(stale)
+
+    def cleanup_stale_tracks(self, max_age_seconds: float = ACTIVE_TRACK_MAX_AGE_SECONDS) -> int:
         """Remove tracks not updated recently."""
         with self._lock:
-            now = datetime.now()
-            stale = [
-                tid for tid, track in self._tracks.items()
-                if (now - track.last_updated).total_seconds() > max_age_seconds
-            ]
-            for tid in stale:
-                del self._tracks[tid]
-            return len(stale)
+            return self._remove_stale_tracks_locked(max_age_seconds)
     
     def reset(self) -> None:
         """Reset all state."""

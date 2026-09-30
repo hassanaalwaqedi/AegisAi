@@ -1,5 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { NextIntlClientProvider } from "next-intl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import messages from "../../../messages/en.json";
 
 const testState = vi.hoisted(() => ({
   fetchCapabilities: vi.fn(),
@@ -80,8 +83,12 @@ const nodes = [{ id: "cameras", label: "Cameras", sublabel: "Runtime", icon: "Ca
 
 function renderCore() {
   const onCapabilityHighlight = vi.fn();
-  const view = render(<AegisVoiceCore contextAvailability="live" nodes={nodes} activeCapability={null} onCapabilityHighlight={onCapabilityHighlight} />);
+  const view = render(withTranslations(<AegisVoiceCore contextAvailability="live" nodes={nodes} activeCapability={null} onCapabilityHighlight={onCapabilityHighlight} />));
   return { ...view, onCapabilityHighlight };
+}
+
+function withTranslations(children: React.ReactNode) {
+  return <NextIntlClientProvider locale="en" messages={messages}>{children}</NextIntlClientProvider>;
 }
 
 beforeEach(() => {
@@ -114,17 +121,17 @@ describe("AegisVoiceCore", () => {
 
     for (const state of ["ready", "listening", "thinking", "speaking"] as const) {
       testState.voice.state = state;
-      rerender(<AegisVoiceCore contextAvailability="live" nodes={nodes} activeCapability={null} onCapabilityHighlight={vi.fn()} />);
+      rerender(withTranslations(<AegisVoiceCore contextAvailability="live" nodes={nodes} activeCapability={null} onCapabilityHighlight={vi.fn()} />));
       expect(screen.getByTestId("aegis-voice-orb")).toHaveAttribute("data-voice-state", state);
     }
 
-    rerender(<AegisVoiceCore contextAvailability="degraded" nodes={nodes} activeCapability={null} onCapabilityHighlight={vi.fn()} />);
+    rerender(withTranslations(<AegisVoiceCore contextAvailability="degraded" nodes={nodes} activeCapability={null} onCapabilityHighlight={vi.fn()} />));
     expect(screen.getByTestId("aegis-voice-orb")).toHaveAttribute("data-voice-state", "degraded");
 
     testState.voice.state = "error";
     testState.voice.error = "Microphone permission was denied.";
-    rerender(<AegisVoiceCore contextAvailability="live" nodes={nodes} activeCapability={null} onCapabilityHighlight={vi.fn()} />);
-    expect(screen.getByRole("alert")).toHaveTextContent(/Microphone permission was denied/i);
+    rerender(withTranslations(<AegisVoiceCore contextAvailability="live" nodes={nodes} activeCapability={null} onCapabilityHighlight={vi.fn()} />));
+    expect(screen.getByRole("alert")).toHaveTextContent(/Voice needs attention/i);
     fireEvent.click(screen.getByRole("button", { name: "Reconnect voice" }));
     expect(testState.voice.stop).toHaveBeenCalledTimes(1);
     expect(testState.voice.startListening).toHaveBeenCalledTimes(1);
@@ -156,14 +163,14 @@ describe("AegisVoiceCore", () => {
     testState.voice.state = "speaking";
     testState.voice.sessionPhase = "response";
     testState.voice.sessionSecondsRemaining = 0;
-    rerender(<AegisVoiceCore contextAvailability="live" nodes={nodes} activeCapability={null} onCapabilityHighlight={vi.fn()} />);
+    rerender(withTranslations(<AegisVoiceCore contextAvailability="live" nodes={nodes} activeCapability={null} onCapabilityHighlight={vi.fn()} />));
     expect(screen.queryByRole("progressbar", { name: /voice session time remaining/i })).not.toBeInTheDocument();
     expect(screen.getByText("Playback active")).toBeInTheDocument();
 
     testState.voice.state = "off";
     testState.voice.sessionActive = false;
     testState.voice.sessionOutcome = "timeout";
-    rerender(<AegisVoiceCore contextAvailability="live" nodes={nodes} activeCapability={null} onCapabilityHighlight={vi.fn()} />);
+    rerender(withTranslations(<AegisVoiceCore contextAvailability="live" nodes={nodes} activeCapability={null} onCapabilityHighlight={vi.fn()} />));
     expect(screen.getByText(/Voice session timed out/i)).toBeInTheDocument();
   });
 
@@ -206,7 +213,7 @@ describe("AegisVoiceCore", () => {
     testState.voice.sendTypedFallback.mockReturnValueOnce(false);
     testState.sendChatMessage.mockResolvedValueOnce({ answer: "Camera evidence is unavailable." });
     const onCapabilityHighlight = vi.fn();
-    render(
+    render(withTranslations(
       <AegisVoiceCore
         contextAvailability="live"
         textChatAvailability="live"
@@ -214,7 +221,7 @@ describe("AegisVoiceCore", () => {
         activeCapability={null}
         onCapabilityHighlight={onCapabilityHighlight}
       />,
-    );
+    ));
     await waitFor(() => expect(testState.callbacks).toBeTruthy());
 
     fireEvent.keyDown(window, { key: "/" });

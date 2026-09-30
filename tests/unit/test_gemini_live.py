@@ -131,6 +131,8 @@ def test_native_audio_sample_rates_are_validated_at_configuration_boundary():
         GeminiLiveSettings(input_sample_rate=7_999)
     with pytest.raises(ValueError):
         GeminiLiveSettings(output_sample_rate=48_001)
+    with pytest.raises(ValueError):
+        GeminiLiveSettings(connect_timeout_seconds=2)
 
 
 def test_browser_protocol_supports_typed_interruption_without_audio_persistence():

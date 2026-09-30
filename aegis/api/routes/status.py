@@ -70,12 +70,30 @@ async def get_status():
     """
     state = get_state()
     status = state.get_status()
+    general_detector = status.get("person_detector", {}).get("runtime", {})
+    weapon_detector = status.get("weapon_detector", {}).get("runtime", {})
+    threat_detector = status.get("threat_detector", {}).get("runtime", {})
+    threat_enabled = bool(status.get("threat_detector", {}).get("enabled"))
+    # A configured detector is not the same thing as one that the running
+    # pipeline has instantiated.  Only an initialized, enabled threat runtime
+    # participates in health readiness.  This keeps the status truthful while
+    # allowing an isolated general-detector runtime to report as ready.
+    threat_initialized = bool(threat_detector.get("backend") or threat_detector.get("model"))
+    vision = {
+        "status": "ready" if general_detector.get("ready") and (
+            not threat_enabled or not threat_initialized or threat_detector.get("ready")
+        ) else "degraded",
+        "general_detector": general_detector,
+        "weapon_detector": weapon_detector,
+        "threat_detector": threat_detector,
+    }
     
     return {
         "status": "ok",
         "version": APP_VERSION,
         "timestamp": datetime.utcnow().isoformat(),
         "system": status,
+        "vision": vision,
         "performance": {
             "fps": status.get("current_fps", status.get("fps", 0)),
             "frames_processed": status.get("frames_processed", 0),
@@ -92,6 +110,7 @@ async def get_status():
             "weapon_detection_supported": status.get("weapon_detection_supported", False),
             "person_detector": status.get("person_detector", {}),
             "weapon_detector": status.get("weapon_detector", {}),
+            "threat_detector": status.get("threat_detector", {}),
             "action_recognition_supported": status.get("action_recognition_supported", False),
             "pose_estimation_supported": status.get("pose_estimation_supported", False),
             "semantic_verification_supported": status.get("semantic_verification_supported", False),

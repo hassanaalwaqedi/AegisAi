@@ -37,6 +37,7 @@ htmlcov
 .env.*.local
 
 # Data files (large)
+data/
 data/input/*.mp4
 data/input/*.avi
 data/output/*.mp4
@@ -58,3 +59,8 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Frontend dependencies and build artifacts are not used by the API image.
+frontend/node_modules/
+frontend/.next/
+frontend/dist/

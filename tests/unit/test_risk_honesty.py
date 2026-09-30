@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from config import DetectionConfig
 from aegis.analysis.analysis_types import BehaviorFlags, CrowdMetrics, MotionState, TrackAnalysis
 from aegis.video.camera_sources import FrameIngestionService
 
@@ -176,9 +177,12 @@ def test_unsupported_weapon_detection_reports_no_weapon_alert():
 
 def test_weapon_model_capabilities_report_best_pt_when_configured():
     capabilities = FrameIngestionService().get_model_capabilities()
+    config = DetectionConfig()
 
-    assert capabilities["weapon_detection_supported"] is True
-    assert capabilities["person_detector"]["model_name"] == "yolo11n.pt"
+    # No optional checkpoint is present in the repository's local model path.
+    # Its absence must remain visible rather than being inferred from labels.
+    assert capabilities["weapon_detection_supported"] is False
+    assert capabilities["person_detector"]["model_name"] == config.model_path
     assert capabilities["weapon_detector"]["supported_classes"] == ["knife", "pistol"]
     assert capabilities["action_recognition_supported"] is False
     assert capabilities["pose_estimation_supported"] is False

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { NextIntlClientProvider } from "next-intl";
+
+import messages from "../../../messages/en.json";
 
 vi.mock("@/hooks/use-aegis-api", async () => {
   const React = await import("react");
@@ -45,7 +48,7 @@ describe("CameraForm RTSP V2", () => {
   });
 
   it("clears a successful connection proof when the RTSP source changes", async () => {
-    render(<CameraForm />);
+    render(withTranslations(<CameraForm />));
 
     fireEvent.change(screen.getByLabelText("Source type"), { target: { value: "RTSP_STREAM" } });
     const host = screen.getByLabelText("Host / IP");
@@ -62,7 +65,7 @@ describe("CameraForm RTSP V2", () => {
   });
 
   it("conceals advanced full RTSP URLs and permits explicit disabled saves", () => {
-    render(<CameraForm />);
+    render(withTranslations(<CameraForm />));
 
     fireEvent.change(screen.getByLabelText("Source type"), { target: { value: "RTSP_STREAM" } });
     fireEvent.click(screen.getByLabelText("Advanced full URL"));
@@ -72,3 +75,7 @@ describe("CameraForm RTSP V2", () => {
     expect(screen.getByRole("button", { name: "Save disabled camera" })).toBeEnabled();
   });
 });
+
+function withTranslations(children: React.ReactNode) {
+  return <NextIntlClientProvider locale="en" messages={messages}>{children}</NextIntlClientProvider>;
+}

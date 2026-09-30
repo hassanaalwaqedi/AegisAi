@@ -54,6 +54,22 @@ def configured_inference_workers() -> int:
     return max(1, min(requested, 4))
 
 
+def configured_inference_interval_seconds() -> float:
+    """Bound per-camera inference cadence while preserving continuous capture.
+
+    Camera sources can run at 30 FPS or more, but running heavyweight vision
+    models on every frame can starve the API and live-voice event loop on a
+    local CPU. The source still captures and serves previews at its native
+    cadence; this only coalesces work submitted to inference.
+    """
+    raw_value = os.getenv("AEGIS_CAMERA_INFERENCE_FPS", "5")
+    try:
+        requested = float(raw_value)
+    except (TypeError, ValueError):
+        requested = 5.0
+    return 1.0 / max(1.0, min(requested, 10.0))
+
+
 class CameraHealthMonitor:
     """Periodically checks camera sources for stale frames."""
 
@@ -291,8 +307,23 @@ class MultiCameraPipelineManager:
         if source.config.source_type != CameraSourceType.BROWSER_WEBCAM:
             raise ValueError("camera_id is not a BROWSER_WEBCAM source")
         frame = decode_base64_frame(base64_frame)
-        source.ingest_frame(frame, notify_pipeline=False)
-        return self.ingestion.process_frame(camera_id, frame, self._evidence_metadata(source))
+        # Publish immediately for the live preview. ``_handle_frame`` then
+        # coalesces detection in the background, so a slow model can never
+        # make the browser wait before it sends the next current frame.
+        source.ingest_frame(frame, notify_pipeline=True)
+        return {
+            "camera_id": camera_id,
+            "frame_id": source.get_status().frames_received,
+            "timestamp": datetime.utcnow().isoformat(),
+            "detections": [],
+            "risk": {
+                "risk_score": 0.0,
+                "risk_level": "LOW",
+                "triggers": ["ANALYSIS_IN_PROGRESS"],
+                "should_escalate": False,
+            },
+            "processing": True,
+        }
 
     def process_uploaded_video(
         self,
@@ -333,12 +364,13 @@ class MultiCameraPipelineManager:
 
     def _handle_frame(self, camera_id: str, frame: np.ndarray) -> None:
         now = time.time()
-        if self._processing.get(camera_id):
-            return
-        if now - self._last_submit.get(camera_id, 0.0) < 0.2:
-            return
-        self._last_submit[camera_id] = now
-        self._processing[camera_id] = True
+        with self._lock:
+            if self._processing.get(camera_id):
+                return
+            if now - self._last_submit.get(camera_id, 0.0) < configured_inference_interval_seconds():
+                return
+            self._last_submit[camera_id] = now
+            self._processing[camera_id] = True
 
         def run() -> None:
             try:
@@ -365,7 +397,8 @@ class MultiCameraPipelineManager:
                         type(exc).__name__,
                     )
             finally:
-                self._processing[camera_id] = False
+                with self._lock:
+                    self._processing[camera_id] = False
 
         self._executor.submit(run)
 

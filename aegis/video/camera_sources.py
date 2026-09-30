@@ -682,6 +682,8 @@ class FrameIngestionService:
         self._proximity_engines: Dict[str, Any] = {}
         self._association_engines: Dict[str, Any] = {}
         self._weapon_aggression_engines: Dict[str, Any] = {}
+        self._threat_fusion_engines: Dict[str, Any] = {}
+        self._situation_engines: Dict[str, Any] = {}
         self._frame_counters: Dict[str, int] = {}
         # A tracker reset can reuse a small numeric ID.  Persisted observations
         # therefore carry a new source epoch instead of pretending that IDs
@@ -749,6 +751,14 @@ class FrameIngestionService:
         )
 
         tracks = tracker.update(detections, frame)
+        threat_fusion_engine = self._get_threat_fusion_engine(camera_id)
+        threat_evidence = threat_fusion_engine.fuse(
+            camera_id,
+            frame_id,
+            detections,
+            tracks,
+            threat_observed=bool(getattr(detector, "threat_executed_this_frame", False)),
+        )
         now = datetime.utcnow()
         timestamp_seconds = time.time() - start_timestamp
 
@@ -801,6 +811,19 @@ class FrameIngestionService:
             analyses=analysis_by_track,
             frame_id=frame_id,
         )
+        zone_manager = getattr(risk_engine, "zone_manager", None)
+        situation_assessments = self._get_situation_engine(camera_id).assess(
+            camera_id=camera_id,
+            tracks=tracks,
+            threat_evidence=[item.to_dict() for item in threat_evidence],
+            analyses=analysis_by_track,
+            base_risks={str(track_id): float(risk.score) for track_id, risk in risk_by_track.items()},
+            zone_for_track=(lambda track: zone_manager.get_context(bbox=getattr(track, "bbox", None))) if zone_manager else None,
+        )
+        situation_by_track = {
+            str(item.primary_track_id): item
+            for item in situation_assessments if item.primary_track_id is not None
+        }
         threat_by_track: Dict[str, Dict[str, Any]] = {}
         for context in threat_contexts:
             context_payload = context.to_dict()
@@ -830,6 +853,8 @@ class FrameIngestionService:
             is_weapon = bool(getattr(track, "is_weapon", False))
             is_vehicle = bool(getattr(track, "is_vehicle", False)) or str(object_category).lower() == "vehicle"
             detector_model_source = getattr(track, "model_source", "") or self.get_model_capabilities().get("model_name", "")
+            detector_origin = str(getattr(track, "detector", "general_yolo"))
+            detection_evidence_type = str(getattr(track, "evidence_type", "general_detection"))
             raw_track_id = str(getattr(track, "track_id", ""))
             association = association_by_person.get(raw_track_id) or association_by_weapon.get(raw_track_id)
             threat_context = threat_by_track.get(raw_track_id)
@@ -868,6 +893,12 @@ class FrameIngestionService:
                 crowd_metrics=crowd_metrics,
                 proximity=proximity,
             )
+            situation = situation_by_track.get(raw_track_id)
+            if situation is not None:
+                risk_score = situation.risk_score
+                risk_level = situation.risk_level
+                explanation = situation.explanation
+                factors = situation.reason_codes
             evidence = self._build_evidence(
                 track=track,
                 bbox=bbox,
@@ -937,6 +968,8 @@ class FrameIngestionService:
                 "zone_name": zone_name,
                 "model_source": evidence["model_source"],
                 "detection_model_source": detector_model_source,
+                "detector": detector_origin,
+                "detection_evidence_type": detection_evidence_type,
                 "risk_level": risk_level,
                 "risk_score": risk_score,
                 "behaviors": behavior_labels,
@@ -958,6 +991,7 @@ class FrameIngestionService:
                 "threat_event_type": evidence.get("threat_event_type"),
                 "nearby_person_track_id": evidence.get("nearby_person_track_id"),
                 "threat_context": evidence.get("threat_context"),
+                "situation_assessment": situation.to_dict() if situation is not None else None,
                 "vehicle_enrichment": vehicle_enrichment,
                 "detected_classes": frame_detected_classes,
                 "movement_state": movement_state,
@@ -1092,6 +1126,7 @@ class FrameIngestionService:
                 weapon_detection_supported=model_info["weapon_detection_supported"],
                 person_detector=model_info.get("person_detector"),
                 weapon_detector=model_info.get("weapon_detector"),
+                threat_detector=model_info.get("threat_detector"),
                 action_recognition_supported=model_info["action_recognition_supported"],
                 pose_estimation_supported=model_info["pose_estimation_supported"],
                 semantic_verification_supported=model_info["semantic_verification_supported"],
@@ -1132,6 +1167,9 @@ class FrameIngestionService:
             },
             "events": generated_events,
             "event": generated_events[-1] if generated_events else None,
+            "threat_evidence": [item.to_dict() for item in threat_evidence],
+            "threat_fusion_diagnostics": threat_fusion_engine.diagnostics(),
+            "situation_assessments": [item.to_dict() for item in situation_assessments],
             "model": self.get_model_capabilities(),
         }
 
@@ -1155,6 +1193,8 @@ class FrameIngestionService:
                 self._proximity_engines,
                 self._association_engines,
                 self._weapon_aggression_engines,
+                self._threat_fusion_engines,
+                self._situation_engines,
             ):
                 mapping.pop(camera_id, None)
             self._frame_counters.pop(camera_id, None)
@@ -1208,13 +1248,17 @@ class FrameIngestionService:
         ]
         person_supported = configured_person_classes if base_detector_available else []
         weapon_supported = list(config.weapon_model_class_names.values())
-        base_weapon_supported = ([
+        # These are the COCO weapon-like classes configured for the general
+        # detector.  Availability remains a separate, truthful runtime flag
+        # below: configuration must not imply that local weights are loaded.
+        base_weapon_classes = [
             class_names.get(class_id, f"class_{class_id}")
             for class_id in sorted(set(target_classes) & set(config.weapon_classes))
-        ] if base_detector_available else [])
+        ]
+        base_weapon_available = base_weapon_classes if base_detector_available else []
         custom_weapon_supported = Path(config.weapon_model_path).is_file()
         available_custom_classes = weapon_supported if custom_weapon_supported else []
-        supported_weapon_classes = list(dict.fromkeys([*base_weapon_supported, *available_custom_classes]))
+        supported_weapon_classes = list(dict.fromkeys([*base_weapon_classes, *available_custom_classes]))
         supported_families = {
             (
                 "firearm"
@@ -1237,15 +1281,17 @@ class FrameIngestionService:
             "supported_classes": list(dict.fromkeys([*person_supported, *available_custom_classes])),
             "supported_weapon_classes": supported_weapon_classes,
             "unsupported_weapon_concepts": unsupported_weapon_concepts,
-            "weapon_detection_supported": bool(supported_weapon_classes),
+            "weapon_detection_supported": bool(
+                (base_detector_available and base_weapon_classes) or available_custom_classes
+            ),
             "person_detector": {
                 "model_name": config.model_path,
                 "detector_available": base_detector_available,
                 "availability": "configured_not_loaded" if base_detector_available else "unavailable",
                 "unavailable_reason": None if base_detector_available else f"Base detector weights are unavailable: {config.model_path}",
                 "supported_classes": person_supported,
-                "weapon_classes": base_weapon_supported,
-                "weapon_detection_supported": bool(base_weapon_supported),
+                "weapon_classes": base_weapon_available,
+                "weapon_detection_supported": bool(base_weapon_available),
             },
             "weapon_detector": {
                 "model_name": config.weapon_model_path,
@@ -1343,6 +1389,22 @@ class FrameIngestionService:
 
             self._association_engines[camera_id] = PersonWeaponAssociationEngine()
         return self._association_engines[camera_id]
+
+    def _get_threat_fusion_engine(self, camera_id: str):
+        if camera_id not in self._threat_fusion_engines:
+            from aegis.fusion import ThreatFusionEngine
+
+            self._threat_fusion_engines[camera_id] = ThreatFusionEngine.from_detection_config(
+                getattr(self._get_detector(), "_config", None)
+            )
+        return self._threat_fusion_engines[camera_id]
+
+    def _get_situation_engine(self, camera_id: str):
+        if camera_id not in self._situation_engines:
+            from aegis.risk.situation_intelligence import SituationIntelligence
+
+            self._situation_engines[camera_id] = SituationIntelligence()
+        return self._situation_engines[camera_id]
 
     def _get_weapon_aggression_engine(self, camera_id: str):
         if camera_id not in self._weapon_aggression_engines:

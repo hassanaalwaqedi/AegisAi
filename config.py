@@ -21,8 +21,15 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
-WEAPON_MODEL_PATH = os.getenv("AEGIS_WEAPON_MODEL_PATH", os.path.join("models", "weapon_detector.pt"))
-WEAPON_CONFIDENCE_THRESHOLD = _float_env("AEGIS_WEAPON_CONFIDENCE_THRESHOLD", 0.35)
+def _vision_settings():
+    """Return the single Pydantic-backed source of vision configuration.
+
+    ``DetectionConfig`` remains as a compatibility adapter for the camera and
+    pipeline code. It must not introduce model defaults of its own.
+    """
+    from aegis.settings import get_settings
+
+    return get_settings().detection
 
 
 def _int_string_map_env(name: str, default: dict) -> dict:
@@ -82,31 +89,50 @@ class DetectionConfig:
         frame_skip: Process every Nth frame (1=all, 2=every other, etc.)
         half_precision: Use FP16 inference (faster on GPU)
     """
-    model_path: str = field(default_factory=lambda: os.getenv("AEGIS_DETECTION_MODEL_PATH", "yolo11n.pt"))
-    confidence_threshold: float = 0.5
-    nms_threshold: float = 0.45
+    model_path: str = field(default_factory=lambda: _vision_settings().model_path)
+    confidence_threshold: float = field(default_factory=lambda: _vision_settings().confidence_threshold)
+    nms_threshold: float = field(default_factory=lambda: _vision_settings().nms_threshold)
     # COCO weapon-like classes are real outputs from yolo11n: baseball bat
     # (34), knife (43), and scissors (76).  Firearms/general weapon classes
     # still require the optional custom detector below.
     target_classes: Tuple[int, ...] = (0, 2, 3, 5, 7, 14, 15, 16, 34, 43, 76)
-    image_size: int = 640
-    frame_skip: int = 1
-    half_precision: bool = False  # CPU-safe default; enable on GPU
+    image_size: int = field(default_factory=lambda: _vision_settings().image_size)
+    frame_skip: int = field(default_factory=lambda: _vision_settings().frame_skip)
+    half_precision: bool = field(default_factory=lambda: _vision_settings().half_precision)
     
     # Weapon-like class IDs emitted by the base COCO detector. Custom-model
     # source IDs are mapped separately through weapon_internal_class_ids.
     weapon_classes: Tuple[int, ...] = (34, 43, 76)
-    weapon_model_path: str = WEAPON_MODEL_PATH
-    weapon_confidence_threshold: float = WEAPON_CONFIDENCE_THRESHOLD
+    weapon_model_path: str = field(default_factory=lambda: _vision_settings().weapon_model_path)
+    weapon_confidence_threshold: float = field(default_factory=lambda: _vision_settings().weapon_confidence_threshold)
+    # Mapping overrides remain read at construction time so camera workers can
+    # be configured independently in tests and short-lived worker processes.
+    # They do not select or substitute a checkpoint.
     weapon_model_class_names: dict = field(default_factory=lambda: _int_string_map_env(
-        "AEGIS_WEAPON_CLASS_NAMES_JSON",
-        {0: "knife", 1: "pistol"},
+        "AEGIS_WEAPON_CLASS_NAMES_JSON", {0: "knife", 1: "pistol"}
     ))
     weapon_internal_class_ids: dict = field(default_factory=lambda: _int_int_map_env(
-        "AEGIS_WEAPON_INTERNAL_CLASS_IDS_JSON",
-        {0: 1000, 1: 1001},
+        "AEGIS_WEAPON_INTERNAL_CLASS_IDS_JSON", {0: 1000, 1: 1001}
     ))
-    weapon_debug_enabled: bool = True
+    weapon_debug_enabled: bool = field(default_factory=lambda: _vision_settings().weapon_debug_enabled)
+    weapon_detector_enabled: bool = field(default_factory=lambda: _vision_settings().weapon_detector_enabled)
+
+    # Open-vocabulary YOLOE threat candidates are independent from both the
+    # general detector and the optional custom weapon checkpoint.
+    threat_detector_enabled: bool = field(default_factory=lambda: _vision_settings().threat_detector_enabled)
+    threat_detector_backend: str = field(default_factory=lambda: _vision_settings().threat_detector_backend)
+    threat_model_path: str = field(default_factory=lambda: _vision_settings().threat_model_path)
+    threat_prompt_embeddings_path: str = field(default_factory=lambda: _vision_settings().threat_prompt_embeddings_path)
+    threat_classes: Tuple[str, ...] = field(default_factory=lambda: _vision_settings().threat_classes)
+    threat_confidence_threshold: float = field(default_factory=lambda: _vision_settings().threat_confidence_threshold)
+    threat_frame_skip: int = field(default_factory=lambda: _vision_settings().threat_frame_skip)
+    threat_fusion_enabled: bool = field(default_factory=lambda: _vision_settings().threat_fusion_enabled)
+    threat_dedup_iou_threshold: float = field(default_factory=lambda: _vision_settings().threat_dedup_iou_threshold)
+    threat_person_expansion_ratio: float = field(default_factory=lambda: _vision_settings().threat_person_expansion_ratio)
+    threat_association_min_score: float = field(default_factory=lambda: _vision_settings().threat_association_min_score)
+    threat_association_winner_margin: float = field(default_factory=lambda: _vision_settings().threat_association_winner_margin)
+    threat_evidence_ttl_frames: int = field(default_factory=lambda: _vision_settings().threat_evidence_ttl_frames)
+    threat_continuity_bonus: float = field(default_factory=lambda: _vision_settings().threat_continuity_bonus)
     
     # COCO animal classes for filtering false positives
     # 14=bird, 15=cat, 16=dog

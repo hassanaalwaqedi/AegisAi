@@ -444,6 +444,16 @@
       "liveCameras": "Live cameras",
       "activeRisk": "Active risk",
       "aiOperator": "AI operator",
+      "humanReviewNote": "Risk signals require human review. They are not a determination of intent or guilt.",
+      "monitor": {
+        "title": "Aegis monitor",
+        "connecting": "Connecting to the live system",
+        "watching": "Monitoring system updates",
+        "update": "{count} new verified update(s)",
+        "risk": "{count} new high-risk signal(s) require review",
+        "degraded": "System health requires attention",
+        "recovered": "System health recovered"
+      },
       "unavailable": "Unavailable",
       "cameras": "Cameras",
       "visionNetwork": "VISION NETWORK",

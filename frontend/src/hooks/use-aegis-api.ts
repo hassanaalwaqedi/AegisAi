@@ -1,6 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRef } from "react";
 import { aegisApiClient, type CameraUpdateInput } from "@/lib/api-client";
 
 export const queryKeys = {
@@ -221,19 +222,20 @@ export function useDeleteCameraMutation() {
 
 export function useBrowserFrameMutation() {
   const queryClient = useQueryClient();
+  const lastInvalidatedAt = useRef(0);
 
   return useMutation({
     mutationFn: ({ cameraId, frame }: { cameraId: string; frame: string }) =>
       aegisApiClient.sendBrowserFrame(cameraId, frame),
     onSuccess: (_, variables) => {
+      const now = Date.now();
+      // Background inference and the camera WebSocket supply live updates.
+      // Avoid re-fetching every dashboard query for every 200 ms frame.
+      if (now - lastInvalidatedAt.current < 2_000) return;
+      lastInvalidatedAt.current = now;
       void queryClient.invalidateQueries({ queryKey: queryKeys.cameraEvents(variables.cameraId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.cameraDetections(variables.cameraId) });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.tracks });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.events });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.alerts });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.incidents });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.evidence });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.statistics });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.cameras });
     }
   });
 }

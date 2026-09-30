@@ -38,6 +38,14 @@ class TrackingStage(PipelineStage):
         self._behavior_analyzers: Dict[str, Any] = {}
         self._crowd_analyzers: Dict[str, Any] = {}
         self._camera_start_ts: Dict[str, float] = {}
+        self._threat_fusion_engines: Dict[str, Any] = {}
+
+    def _get_threat_fusion_engine(self, camera_id: str):
+        if camera_id not in self._threat_fusion_engines:
+            from config import DetectionConfig
+            from aegis.fusion import ThreatFusionEngine
+            self._threat_fusion_engines[camera_id] = ThreatFusionEngine.from_detection_config(DetectionConfig())
+        return self._threat_fusion_engines[camera_id]
 
     def _get_tracker(self, camera_id: str):
         """Get or create a tracker for a camera."""
@@ -103,6 +111,11 @@ class TrackingStage(PipelineStage):
 
                 tracker = self._get_tracker(camera_id)
                 tracks = tracker.update(detections, frame)
+                fusion = self._get_threat_fusion_engine(camera_id)
+                threat_evidence = fusion.fuse(
+                    camera_id, frame_id, detections, tracks,
+                    threat_observed=bool(msg.get("threat_detector_executed", False)),
+                )
 
                 timestamp_seconds = time.time() - self._camera_start_ts[camera_id]
 
@@ -131,7 +144,9 @@ class TrackingStage(PipelineStage):
                         "bbox": list(getattr(track, "bbox", (0, 0, 0, 0))),
                         "is_person": bool(getattr(track, "is_person", False)),
                         "is_weapon": bool(getattr(track, "is_weapon", False)),
-                        "is_vehicle": bool(getattr(track, "is_vehicle", False)),
+                    "is_vehicle": bool(getattr(track, "is_vehicle", False)),
+                    "detector": str(getattr(track, "detector", "general_yolo")),
+                    "evidence_type": str(getattr(track, "evidence_type", "general_detection")),
                         "history_length": history.history_length if history else 0,
                         "duration": history.duration if history else 0.0,
                         "has_motion": motion is not None,
@@ -150,6 +165,8 @@ class TrackingStage(PipelineStage):
                     "crowd_density": getattr(crowd_metrics, "density", 0.0),
                     "detection_count": msg.get("detection_count", 0),
                     "inference_ms": msg.get("inference_ms", 0),
+                    "threat_evidence": [item.to_dict() for item in threat_evidence],
+                    "threat_fusion_diagnostics": fusion.diagnostics(),
                     "_frame": frame,
                     "_tracks": tracks,
                     "_track_analyses_raw": {
@@ -188,6 +205,8 @@ class TrackingStage(PipelineStage):
                     is_animal=bool(d.get("is_animal", False)),
                     model_source=str(d.get("model_source", "")),
                     source_class_id=d.get("source_class_id"),
+                    detector=str(d.get("detector", "general_yolo")),
+                    evidence_type=str(d.get("evidence_type", "general_detection")),
                 )
                 for d in raw
             ]

@@ -10,18 +10,46 @@ import {
   serverVoiceEnvelopeSchema,
   type LiveCitation,
   type LiveSession,
+  type AegisVoiceSessionState,
   type SafeUICommand,
-  type VoiceState
+  type VoiceState,
+  type WakeWordMode,
 } from "@/lib/live-voice";
 
 type CaptureMode = "native-audio" | "speech-recognition" | null;
 
-export type VoiceSessionPhase = "idle" | "listening" | "processing" | "response";
+export type VoiceSessionPhase = "idle" | "activating" | "standby" | "wake_detected" | "listening" | "end_of_speech" | "processing" | "response" | "follow_up" | "muted";
 export type VoiceSessionOutcome = "cancelled" | "timeout" | null;
 export type AudibleAlertPlaybackResult = "spoken" | "unavailable" | "busy";
 
-/** An open conversation ends only after 60 seconds without a new request. */
-export const VOICE_CONVERSATION_IDLE_TIMEOUT_MS = 60_000;
+function configuredMilliseconds(value: string | undefined, fallback: number, min: number, max: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, Math.round(parsed))) : fallback;
+}
+
+/** One source of truth for all hands-free timing and VAD thresholds. */
+export const AEGIS_VOICE_SESSION_CONFIG = {
+  followUpWindowMs: configuredMilliseconds(process.env.NEXT_PUBLIC_AEGIS_VOICE_FOLLOW_UP_MS, 20_000, 15_000, 30_000),
+  gatewayReadyTimeoutMs: configuredMilliseconds(process.env.NEXT_PUBLIC_AEGIS_VOICE_GATEWAY_READY_TIMEOUT_MS, 8_000, 4_000, 20_000),
+  responseTimeoutMs: configuredMilliseconds(process.env.NEXT_PUBLIC_AEGIS_VOICE_RESPONSE_TIMEOUT_MS, 25_000, 8_000, 60_000),
+  gatewayReconnectDelayMs: 300,
+  maxGatewayReconnectAttempts: 1,
+  vadSpeechStartLevel: 0.018,
+  vadSpeechEndLevel: 0.011,
+  vadStartFrames: 2,
+  vadEndFrames: 12,
+  recognitionRestartDelayMs: 200,
+} as const;
+
+/** Compatibility export for callers that previously named this an idle timeout. */
+export const VOICE_CONVERSATION_IDLE_TIMEOUT_MS = AEGIS_VOICE_SESSION_CONFIG.followUpWindowMs;
+export const VOICE_FOLLOW_UP_WINDOW_MS = AEGIS_VOICE_SESSION_CONFIG.followUpWindowMs;
+
+/** Returns the command portion only when a standalone wake phrase was heard. */
+export function wakePhraseCommand(text: string): string | null {
+  const match = text.match(/^\s*(?:hey\s+)?aegis\b[\s,.:;!\-]*/i);
+  return match ? text.slice(match[0].length).trim() : null;
+}
 
 type BrowserSpeechRecognitionResult = {
   isFinal: boolean;
@@ -416,11 +444,11 @@ export function voiceStateLabel(state: VoiceState) {
 }
 
 /**
- * A short, explicit operator voice turn. Native 16 kHz microphone PCM is sent
- * through the authenticated Gemini Live gateway so Gemini can transcribe the
- * operator's actual language. Browser speech recognition is only a fallback.
- * No microphone is opened until startListening is called from a user gesture,
- * and every exit path releases it.
+ * An activated operator voice session. Native 16 kHz microphone PCM is sent
+ * through the authenticated Gemini Live gateway only while local VAD detects
+ * speech. Browser recognition may gate wake detection before a Live session;
+ * the browser's own provider policy applies to that recognizer. First-use
+ * activation is a user gesture, and mute/deactivation release microphone use.
  */
 export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
   const [state, setState] = useState<VoiceState>("off");
@@ -430,6 +458,11 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
   const [captureMode, setCaptureMode] = useState<CaptureMode>(null);
   const [isCapturing, setIsCapturing] = useState(false);
   const [sessionPhase, setSessionPhase] = useState<VoiceSessionPhase>("idle");
+  const [voiceSessionState, setVoiceSessionState] = useState<AegisVoiceSessionState>("DISABLED");
+  const [isActivated, setIsActivated] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isUserSpeaking, setIsUserSpeaking] = useState(false);
+  const [wakeWordMode, setWakeWordMode] = useState<WakeWordMode>("unavailable");
   const [sessionOutcome, setSessionOutcome] = useState<VoiceSessionOutcome>(null);
   const [sessionSecondsRemaining, setSessionSecondsRemaining] = useState(0);
   const [sessionActive, setSessionActive] = useState(false);
@@ -446,14 +479,22 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
   const audibleAlertOutputSampleRateRef = useRef(24_000);
   const audibleAlertDrainTimerRef = useRef<number | null>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const wakeRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const wakeRecognitionStartingRef = useRef(false);
+  const wakeRecognitionRestartTimerRef = useRef<number | null>(null);
   const inputAudioContextRef = useRef<AudioContext | null>(null);
   const inputMediaStreamRef = useRef<MediaStream | null>(null);
   const inputSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const inputProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const inputSinkRef = useRef<GainNode | null>(null);
   const nativeInputActiveRef = useRef(false);
+  const nativeTransmissionActiveRef = useRef(false);
+  const nativeSpeechFramesRef = useRef(0);
+  const nativeSilenceFramesRef = useRef(0);
+  const waveformLevelRef = useRef(0);
   const pendingInputAudioRef = useRef<ArrayBuffer[]>([]);
   const pendingInputAudioBytesRef = useRef(0);
+  const pendingAudioEndRef = useRef(false);
   const beginSpeechRecognitionRef = useRef<(epoch: number) => void>(() => undefined);
   const recognitionRestartTimerRef = useRef<number | null>(null);
   const recognitionStartingRef = useRef(false);
@@ -463,6 +504,8 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
   const sessionDeadlineRef = useRef(0);
   const sessionPhaseRef = useRef<VoiceSessionPhase>("idle");
   const sessionTimerRef = useRef<number | null>(null);
+  const gatewayReadyTimerRef = useRef<number | null>(null);
+  const responseTimerRef = useRef<number | null>(null);
   const connectionOpeningRef = useRef(false);
   const gatewayReadyRef = useRef(false);
   const pendingTranscriptRef = useRef<string | null>(null);
@@ -473,6 +516,11 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
   const nativeAudioPlaybackStartedRef = useRef(false);
   const outputSampleRateRef = useRef(24_000);
   const manuallyStoppedRef = useRef(false);
+  const activatedRef = useRef(false);
+  const mutedRef = useRef(false);
+  const beginWakeDetectionRef = useRef<() => void>(() => undefined);
+  const beginConversationRef = useRef<(initialTranscript?: string) => Promise<void>>(() => Promise.resolve());
+  const openLiveConnectionRef = useRef<(epoch: number, attempt?: number) => void>(() => undefined);
   // Audio analysers sample at the display refresh rate. Keep the raw value in
   // a ref and publish only meaningful changes so a playback meter cannot
   // trigger a React render loop while native audio is playing.
@@ -493,6 +541,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     if (!sessionActiveRef.current) return;
     nativeAudioPlaybackStartedRef.current = true;
     setPhase("response");
+    setVoiceSessionState("SPEAKING");
     setState("speaking");
   }, [setPhase]);
   const onPlayerIdle = useCallback(() => {
@@ -567,6 +616,18 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     if (socket?.readyState === WebSocket.OPEN) socket.send(browserVoiceEnvelope(type, data, mimeType));
   }, []);
 
+  const queueOrSendAudioEnd = useCallback(() => {
+    if (!sessionActiveRef.current) return;
+    const socket = socketRef.current;
+    if (gatewayReadyRef.current && socket?.readyState === WebSocket.OPEN) {
+      socket.send(browserVoiceEnvelope("audio_end"));
+      return;
+    }
+    // A user can finish speaking during the short gateway handshake. Preserve
+    // that turn boundary beside queued PCM so Gemini does not wait forever.
+    pendingAudioEndRef.current = true;
+  }, []);
+
   const queueOrSendInputAudio = useCallback((pcm: ArrayBuffer) => {
     if (!sessionActiveRef.current || pcm.byteLength === 0) return;
     const socket = socketRef.current;
@@ -591,6 +652,10 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     }
     pendingInputAudioRef.current = [];
     pendingInputAudioBytesRef.current = 0;
+    if (pendingAudioEndRef.current) {
+      pendingAudioEndRef.current = false;
+      socket.send(browserVoiceEnvelope("audio_end"));
+    }
   }, []);
 
   const pauseConversationInactivityTimer = useCallback(() => {
@@ -599,14 +664,40 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     setSessionSecondsRemaining(0);
   }, []);
 
+  const clearGatewayReadyTimer = useCallback(() => {
+    if (gatewayReadyTimerRef.current !== null) window.clearTimeout(gatewayReadyTimerRef.current);
+    gatewayReadyTimerRef.current = null;
+  }, []);
+
+  const clearResponseTimer = useCallback(() => {
+    if (responseTimerRef.current !== null) window.clearTimeout(responseTimerRef.current);
+    responseTimerRef.current = null;
+  }, []);
+
+  const armResponseTimeout = useCallback(() => {
+    clearResponseTimer();
+    responseTimerRef.current = window.setTimeout(() => {
+      if (!sessionActiveRef.current || responseCompleteRef.current) return;
+      finishSessionRef.current(null, "Aegis did not receive a voice response in time. Tap Talk to Aegis to reconnect.");
+    }, AEGIS_VOICE_SESSION_CONFIG.responseTimeoutMs);
+  }, [clearResponseTimer]);
+
   const clearSessionTimers = useCallback(() => {
     pauseConversationInactivityTimer();
+    clearGatewayReadyTimer();
+    clearResponseTimer();
     if (recognitionRestartTimerRef.current !== null) window.clearTimeout(recognitionRestartTimerRef.current);
     recognitionRestartTimerRef.current = null;
-  }, [pauseConversationInactivityTimer]);
+  }, [clearGatewayReadyTimer, clearResponseTimer, pauseConversationInactivityTimer]);
 
   const stopNativeAudioCapture = useCallback(() => {
     nativeInputActiveRef.current = false;
+    nativeTransmissionActiveRef.current = false;
+    nativeSpeechFramesRef.current = 0;
+    nativeSilenceFramesRef.current = 0;
+    waveformLevelRef.current = 0;
+    setIsUserSpeaking(false);
+    setWaveformLevel(0);
     pendingInputAudioRef.current = [];
     pendingInputAudioBytesRef.current = 0;
     const processor = inputProcessorRef.current;
@@ -646,6 +737,25 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     setWaveformLevel(0);
   }, []);
 
+  /** Stops only the browser-side wake recognizer; it never owns a Live socket. */
+  const stopWakeRecognition = useCallback(() => {
+    if (wakeRecognitionRestartTimerRef.current !== null) window.clearTimeout(wakeRecognitionRestartTimerRef.current);
+    wakeRecognitionRestartTimerRef.current = null;
+    const recognition = wakeRecognitionRef.current;
+    wakeRecognitionRef.current = null;
+    wakeRecognitionStartingRef.current = false;
+    if (recognition) {
+      recognition.onend = null;
+      recognition.onerror = null;
+      recognition.onresult = null;
+      try {
+        recognition.abort();
+      } catch {
+        // The browser may already have closed this recognition turn.
+      }
+    }
+  }, []);
+
   const startNativeAudioCapture = useCallback(async (epoch: number) => {
     if (!sessionActiveRef.current || epoch !== sessionEpochRef.current) return false;
     if (nativeInputActiveRef.current) return true;
@@ -671,16 +781,56 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
 
     const context = new AudioContext();
     const source = context.createMediaStreamSource(stream);
-    // ScriptProcessor is used for broad browser support. It runs only while an
-    // operator actively holds a Live session and sends no audio to Aegis logs
-    // or storage; each PCM chunk is forwarded in memory to Gemini Live.
+    // ScriptProcessor is used for broad browser support. It remains local
+    // until the VAD observes speech; ambient standby/follow-up PCM is never
+    // forwarded to Gemini merely to keep a session warm.
     const processor = context.createScriptProcessor(2_048, 1, 1);
     const silentSink = context.createGain();
     silentSink.gain.value = 0;
     processor.onaudioprocess = (event) => {
       if (!sessionActiveRef.current || epoch !== sessionEpochRef.current || !nativeInputActiveRef.current) return;
-      const pcm = resampleMonoToPcm16(event.inputBuffer.getChannelData(0), context.sampleRate);
-      queueOrSendInputAudio(pcm);
+      const samples = event.inputBuffer.getChannelData(0);
+      let energy = 0;
+      for (let index = 0; index < samples.length; index += 1) energy += samples[index] * samples[index];
+      const level = Math.min(1, Math.sqrt(energy / Math.max(1, samples.length)) * 3);
+      const published = Math.round(level * 20) / 20;
+      if (Math.abs(waveformLevelRef.current - published) >= 0.05) {
+        waveformLevelRef.current = published;
+        setWaveformLevel(published);
+      }
+
+      if (level >= AEGIS_VOICE_SESSION_CONFIG.vadSpeechStartLevel) {
+        nativeSpeechFramesRef.current += 1;
+        nativeSilenceFramesRef.current = 0;
+      } else if (level <= AEGIS_VOICE_SESSION_CONFIG.vadSpeechEndLevel) {
+        nativeSpeechFramesRef.current = 0;
+        if (nativeTransmissionActiveRef.current) nativeSilenceFramesRef.current += 1;
+      }
+
+      if (!nativeTransmissionActiveRef.current && nativeSpeechFramesRef.current >= AEGIS_VOICE_SESSION_CONFIG.vadStartFrames) {
+        nativeTransmissionActiveRef.current = true;
+        setIsUserSpeaking(true);
+        setPhase("listening");
+        setVoiceSessionState("LISTENING");
+        setState("listening");
+        if (player.isPlaying) {
+          player.stop();
+          send("interrupt");
+        }
+      }
+
+      if (!nativeTransmissionActiveRef.current) return;
+      queueOrSendInputAudio(resampleMonoToPcm16(samples, context.sampleRate));
+      if (nativeSilenceFramesRef.current >= AEGIS_VOICE_SESSION_CONFIG.vadEndFrames) {
+        nativeTransmissionActiveRef.current = false;
+        nativeSilenceFramesRef.current = 0;
+        setIsUserSpeaking(false);
+        setPhase("end_of_speech");
+        setVoiceSessionState("END_OF_SPEECH");
+        setState("thinking");
+        queueOrSendAudioEnd();
+        armResponseTimeout();
+      }
     };
     source.connect(processor);
     processor.connect(silentSink);
@@ -696,7 +846,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     setIsCapturing(true);
     setState("listening");
     return true;
-  }, [queueOrSendInputAudio]);
+  }, [armResponseTimeout, player, queueOrSendAudioEnd, queueOrSendInputAudio, send, setPhase]);
 
   const finishSession = useCallback((outcome: VoiceSessionOutcome = null, message: string | null = null) => {
     const session = sessionRef.current;
@@ -713,12 +863,18 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     responseCompleteRef.current = false;
     nativeAudioQueuedRef.current = false;
     nativeAudioPlaybackStartedRef.current = false;
+    pendingAudioEndRef.current = false;
     conversationAudioBatcher.clear();
     closeAudibleAlert(true);
     clearSessionTimers();
     stopNativeAudioCapture();
     stopRecognition();
-    void player.close();
+    // Keep the user-authorized output context alive while Aegis is in standby.
+    // A wake event is not itself a fresh click, so recreating it then may make
+    // the next native response ineligible for browser playback.
+    player.stop();
+    player.endStream();
+    if (!activatedRef.current || mutedRef.current) void player.close();
     socketRef.current = null;
     sessionRef.current = null;
     if (socket?.readyState === WebSocket.OPEN) socket.send(browserVoiceEnvelope("stop"));
@@ -732,6 +888,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     setSessionSecondsRemaining(0);
     setSessionOutcome(outcome);
     setError(message);
+    setVoiceSessionState(message && outcome === null ? "ERROR" : mutedRef.current ? "MUTED" : "DISABLED");
     setState(message && outcome === null ? "error" : "off");
   }, [clearSessionTimers, closeAudibleAlert, conversationAudioBatcher, player, setPhase, stopNativeAudioCapture, stopRecognition]);
 
@@ -749,18 +906,25 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     nativeAudioPlaybackStartedRef.current = false;
     player.beginStream();
     socket.send(browserVoiceEnvelope("text", text));
-  }, [player]);
+    armResponseTimeout();
+    setPhase("processing");
+    setVoiceSessionState("THINKING");
+    setState("thinking");
+  }, [armResponseTimeout, player, setPhase]);
 
   const resetConversationInactivityTimer = useCallback((epoch: number) => {
     pauseConversationInactivityTimer();
-    const deadline = Date.now() + VOICE_CONVERSATION_IDLE_TIMEOUT_MS;
+    const deadline = Date.now() + VOICE_FOLLOW_UP_WINDOW_MS;
     sessionDeadlineRef.current = deadline;
-    setSessionSecondsRemaining(Math.ceil(VOICE_CONVERSATION_IDLE_TIMEOUT_MS / 1_000));
+    setSessionSecondsRemaining(Math.ceil(VOICE_FOLLOW_UP_WINDOW_MS / 1_000));
     sessionTimerRef.current = window.setInterval(() => {
       if (!sessionActiveRef.current || epoch !== sessionEpochRef.current) return;
       const remaining = Math.max(0, deadline - Date.now());
       setSessionSecondsRemaining(Math.ceil(remaining / 1_000));
-      if (remaining === 0) finishSessionRef.current("timeout", "No request was received for 60 seconds. Listening stopped safely.");
+      if (remaining === 0) {
+        finishSessionRef.current("timeout", null);
+        if (activatedRef.current && !mutedRef.current) window.setTimeout(() => beginWakeDetectionRef.current(), 0);
+      }
     }, 250);
   }, [pauseConversationInactivityTimer]);
 
@@ -776,6 +940,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     pauseConversationInactivityTimer();
     stopRecognition();
     setPhase("processing");
+    setVoiceSessionState("THINKING");
     setState("thinking");
     callbacksRef.current.onTranscript?.({ speaker: "operator", text: trimmed, isFinal: true });
     flushPendingTranscript();
@@ -799,6 +964,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
       recognitionStartingRef.current = false;
       setCaptureMode("speech-recognition");
       setIsCapturing(true);
+      setVoiceSessionState("LISTENING");
       setState("listening");
     };
     recognition.onresult = (event) => {
@@ -854,41 +1020,76 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     beginSpeechRecognitionRef.current = beginSpeechRecognition;
   }, [beginSpeechRecognition]);
 
-  const openLiveConnection = useCallback(async (epoch: number) => {
+  const openLiveConnection = useCallback(async (epoch: number, attempt = 0) => {
     if (connectionOpeningRef.current || socketRef.current || !sessionActiveRef.current || epoch !== sessionEpochRef.current) return;
     connectionOpeningRef.current = true;
-    let session: LiveSession;
+    let session: LiveSession | null = null;
+    let socket: WebSocket | null = null;
+
+    const retryOrFinish = (message: string) => {
+      if (!sessionActiveRef.current || epoch !== sessionEpochRef.current) return;
+      clearGatewayReadyTimer();
+      connectionOpeningRef.current = false;
+      gatewayReadyRef.current = false;
+      if (socketRef.current === socket) socketRef.current = null;
+      if (sessionRef.current === session) sessionRef.current = null;
+      if (socket) {
+        socket.onclose = null;
+        socket.onerror = null;
+        try {
+          socket.close(1000, "retrying voice connection");
+        } catch {
+          // A failed WebSocket may already be closed by the browser.
+        }
+      }
+      if (session) void closeLiveSession(session.sessionId);
+
+      if (attempt < AEGIS_VOICE_SESSION_CONFIG.maxGatewayReconnectAttempts) {
+        setState("connecting");
+        setVoiceSessionState("LISTENING");
+        window.setTimeout(() => {
+          void openLiveConnectionRef.current(epoch, attempt + 1);
+        }, AEGIS_VOICE_SESSION_CONFIG.gatewayReconnectDelayMs);
+        return;
+      }
+      finishSessionRef.current(null, message);
+    };
+
     try {
       session = await createLiveSession();
     } catch (nextError) {
-      if (sessionActiveRef.current && epoch === sessionEpochRef.current) {
-        finishSessionRef.current(null, nextError instanceof Error ? nextError.message : "The voice session could not be created.");
-      }
+      retryOrFinish(nextError instanceof Error ? nextError.message : "The voice session could not be created.");
       return;
     }
     if (!sessionActiveRef.current || epoch !== sessionEpochRef.current) {
+      connectionOpeningRef.current = false;
       void closeLiveSession(session.sessionId);
       return;
     }
     sessionRef.current = session;
     outputSampleRateRef.current = session.capabilities.outputSampleRate ?? 24_000;
-    let socket: WebSocket;
     try {
       socket = new WebSocket(liveWebSocketUrl(session.sessionId), [session.capabilities.websocketProtocol, session.connectionToken]);
     } catch (nextError) {
       void closeLiveSession(session.sessionId);
       sessionRef.current = null;
-      if (sessionActiveRef.current && epoch === sessionEpochRef.current) {
-        finishSessionRef.current(null, nextError instanceof Error ? nextError.message : "The voice WebSocket could not be created.");
-      }
+      session = null;
+      retryOrFinish(nextError instanceof Error ? nextError.message : "The voice WebSocket could not be created.");
       return;
     }
     socketRef.current = socket;
     connectionOpeningRef.current = false;
+    setState("connecting");
     socket.binaryType = "arraybuffer";
+    gatewayReadyTimerRef.current = window.setTimeout(() => {
+      if (socketRef.current === socket && !gatewayReadyRef.current) {
+        retryOrFinish("Aegis could not establish the secure voice connection. Check the service and try again.");
+      }
+    }, AEGIS_VOICE_SESSION_CONFIG.gatewayReadyTimeoutMs);
     socket.onmessage = (message) => {
       const queueNativeAudio = (chunk: ArrayBuffer) => {
         if (!sessionActiveRef.current || socketRef.current !== socket) return;
+        clearResponseTimer();
         nativeAudioQueuedRef.current = true;
         conversationAudioBatcher.enqueue(chunk, outputSampleRateRef.current);
       };
@@ -916,33 +1117,44 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
       }
       const event = parsed.data;
       if (!sessionActiveRef.current || socketRef.current !== socket) return;
-      if (event.type === "session_ready") outputSampleRateRef.current = event.outputSampleRate ?? outputSampleRateRef.current;
+      if (event.type === "session_ready") {
+        outputSampleRateRef.current = event.outputSampleRate ?? outputSampleRateRef.current;
+        clearGatewayReadyTimer();
+      }
       if (event.type === "state" && event.state) {
         if (event.state === "ready") {
+          clearGatewayReadyTimer();
           gatewayReadyRef.current = true;
           if (callbacksRef.current.sceneContext) socket.send(JSON.stringify({ version: "1.0", type: "scene_context", data: callbacksRef.current.sceneContext }));
           flushPendingInputAudio();
           flushPendingTranscript();
         } else if (event.state === "thinking") {
           setPhase("processing");
+          setVoiceSessionState("THINKING");
           setState("thinking");
         }
       }
       if (event.type === "transcript" && event.speaker && event.text) {
+        if (event.speaker === "aegis") clearResponseTimer();
         if (event.speaker === "operator" && event.isFinal && event.text.trim() === lastSubmittedTranscriptRef.current) return;
         callbacksRef.current.onTranscript?.({ speaker: event.speaker, text: event.text, isFinal: event.isFinal ?? true });
       }
       if (event.type === "citations" && event.citations) callbacksRef.current.onCitations?.(event.citations);
       if (event.type === "ui_command" && event.uiCommand) callbacksRef.current.onUiCommand?.(event.uiCommand);
       if (event.type === "projection" && event.projection) callbacksRef.current.onProjection?.(event.projection);
-      if (event.type === "tool_activity" && event.tool && event.toolStatus) callbacksRef.current.onToolActivity?.({ tool: event.tool, status: event.toolStatus, turnId: event.turnId });
+      if (event.type === "tool_activity" && event.tool && event.toolStatus) {
+        if (event.toolStatus === "calling") setVoiceSessionState("EXECUTING");
+        callbacksRef.current.onToolActivity?.({ tool: event.tool, status: event.toolStatus, turnId: event.turnId });
+      }
       if (event.type === "interrupted") {
+        clearResponseTimer();
         conversationAudioBatcher.clear();
         player.stop();
         responseCompleteRef.current = true;
         resumeListeningRef.current();
       }
       if (event.type === "turn_complete") {
+        clearResponseTimer();
         callbacksRef.current.onTurnComplete?.();
         responseCompleteRef.current = true;
         conversationAudioBatcher.flush();
@@ -952,16 +1164,20 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
         }
       }
       if (event.type === "error") {
-        finishSessionRef.current(null, event.message ?? "The Gemini Live gateway reported an error.");
+        retryOrFinish(event.message ?? "The Gemini Live gateway reported an error.");
       }
     };
     socket.onerror = () => {
-      if (socketRef.current === socket && !manuallyStoppedRef.current) finishSessionRef.current(null, "The secure Gemini Live connection failed.");
+      if (socketRef.current === socket && !manuallyStoppedRef.current) retryOrFinish("The secure Gemini Live connection failed.");
     };
     socket.onclose = () => {
-      if (socketRef.current === socket && !manuallyStoppedRef.current) finishSessionRef.current(null, "The Gemini Live connection closed.");
+      if (socketRef.current === socket && !manuallyStoppedRef.current) retryOrFinish("The Gemini Live connection closed.");
     };
-  }, [conversationAudioBatcher, flushPendingInputAudio, flushPendingTranscript, player, setPhase]);
+  }, [clearGatewayReadyTimer, clearResponseTimer, conversationAudioBatcher, flushPendingInputAudio, flushPendingTranscript, player, setPhase]);
+
+  useEffect(() => {
+    openLiveConnectionRef.current = openLiveConnection;
+  }, [openLiveConnection]);
 
   /**
    * Prime native Gemini audio from a deliberate opt-in click. This never asks
@@ -1142,8 +1358,9 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     conversationAudioBatcher.clear();
     submittedTranscriptRef.current = false;
     lastSubmittedTranscriptRef.current = null;
-    setPhase("listening");
-    setState("listening");
+    setPhase("follow_up");
+    setVoiceSessionState("FOLLOW_UP_WINDOW");
+    setState("ready");
     resetConversationInactivityTimer(epoch);
     if (!nativeInputActiveRef.current) beginSpeechRecognitionRef.current(epoch);
   }, [conversationAudioBatcher, resetConversationInactivityTimer, setPhase]);
@@ -1152,11 +1369,93 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     resumeListeningRef.current = resumeListening;
   }, [resumeListening]);
 
-  const startListening = useCallback(async () => {
-    if (sessionActiveRef.current) {
-      finishSession("cancelled", "Listening cancelled.");
+  const beginWakeDetection = useCallback(() => {
+    if (!activatedRef.current || mutedRef.current || sessionActiveRef.current || wakeRecognitionRef.current || wakeRecognitionStartingRef.current) return;
+    const Recognition = browserSpeechRecognitionConstructor();
+    if (!Recognition) {
+      // No local wake engine is available. This is deliberately explicit: the
+      // user remains in a VAD-gated active session, not a falsely-labelled
+      // private wake-word mode.
+      setWakeWordMode("session-listening");
+      setPhase("listening");
+      setVoiceSessionState("LISTENING");
+      void beginConversationRef.current();
       return;
     }
+
+    setWakeWordMode("browser-recognition");
+    setPhase("standby");
+    setVoiceSessionState("STANDBY");
+    setState("ready");
+    wakeRecognitionStartingRef.current = true;
+    const recognition = new Recognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = navigator.language || "en-US";
+    recognition.onstart = () => {
+      if (!activatedRef.current || mutedRef.current || sessionActiveRef.current) return;
+      wakeRecognitionStartingRef.current = false;
+      setCaptureMode("speech-recognition");
+      setIsCapturing(true);
+    };
+    recognition.onresult = (event) => {
+      if (!activatedRef.current || mutedRef.current || sessionActiveRef.current) return;
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const text = result?.[0]?.transcript?.trim() ?? "";
+        const command = wakePhraseCommand(text);
+        if (command === null) continue;
+        // Interim detection creates the immediate visual attention response;
+        // only a final browser transcript may activate a remote session.
+        setPhase("wake_detected");
+        setVoiceSessionState("WAKE_DETECTED");
+        if (!result.isFinal) continue;
+        stopWakeRecognition();
+        setIsCapturing(false);
+        setCaptureMode(null);
+        void beginConversationRef.current(command || undefined);
+        return;
+      }
+    };
+    recognition.onerror = (event) => {
+      wakeRecognitionStartingRef.current = false;
+      if (!activatedRef.current || mutedRef.current || event.error === "aborted" || event.error === "no-speech") return;
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        activatedRef.current = false;
+        setIsActivated(false);
+        setVoiceSessionState("ERROR");
+        setState("error");
+        setError("Microphone permission was denied. Allow microphone access to activate Aegis.");
+      }
+    };
+    recognition.onend = () => {
+      wakeRecognitionStartingRef.current = false;
+      if (wakeRecognitionRef.current === recognition) wakeRecognitionRef.current = null;
+      if (!activatedRef.current || mutedRef.current || sessionActiveRef.current) return;
+      if (wakeRecognitionRestartTimerRef.current !== null) return;
+      wakeRecognitionRestartTimerRef.current = window.setTimeout(() => {
+        wakeRecognitionRestartTimerRef.current = null;
+        beginWakeDetectionRef.current();
+      }, AEGIS_VOICE_SESSION_CONFIG.recognitionRestartDelayMs);
+    };
+    wakeRecognitionRef.current = recognition;
+    try {
+      recognition.start();
+    } catch (error) {
+      wakeRecognitionRef.current = null;
+      wakeRecognitionStartingRef.current = false;
+      setVoiceSessionState("ERROR");
+      setState("error");
+      setError(error instanceof Error ? `Wake detection could not start: ${error.message}` : "Wake detection could not start.");
+    }
+  }, [stopWakeRecognition]);
+
+  useEffect(() => {
+    beginWakeDetectionRef.current = beginWakeDetection;
+  }, [beginWakeDetection]);
+
+  const startListening = useCallback(async (initialTranscript?: string) => {
+    if (sessionActiveRef.current) return;
     if (!navigator.mediaDevices?.getUserMedia && !browserSpeechRecognitionConstructor()) {
       setError("Microphone capture is not supported in this browser. Use the typed fallback.");
       setState("error");
@@ -1165,13 +1464,17 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     // An explicit operator conversation always wins over a background risk
     // alert. Stop its socket and isolated player before opening the microphone.
     closeAudibleAlert(true);
+    stopWakeRecognition();
+    setIsCapturing(false);
+    setCaptureMode(null);
     const epoch = sessionEpochRef.current + 1;
     sessionEpochRef.current = epoch;
     sessionActiveRef.current = true;
     setSessionActive(true);
     manuallyStoppedRef.current = false;
     gatewayReadyRef.current = false;
-    pendingTranscriptRef.current = null;
+    pendingTranscriptRef.current = initialTranscript?.trim() || null;
+    pendingAudioEndRef.current = false;
     submittedTranscriptRef.current = false;
     lastSubmittedTranscriptRef.current = null;
     responseCompleteRef.current = false;
@@ -1180,6 +1483,7 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     conversationAudioBatcher.clear();
     setError(null);
     setSessionOutcome(null);
+    setVoiceSessionState("LISTENING");
     setPhase("listening");
     setState("listening");
     resetConversationInactivityTimer(epoch);
@@ -1190,10 +1494,90 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
       if (!started) beginSpeechRecognition(epoch);
     });
     void openLiveConnection(epoch);
-  }, [beginSpeechRecognition, closeAudibleAlert, conversationAudioBatcher, finishSession, openLiveConnection, player, resetConversationInactivityTimer, setPhase, startNativeAudioCapture]);
+  }, [beginSpeechRecognition, closeAudibleAlert, conversationAudioBatcher, openLiveConnection, player, resetConversationInactivityTimer, setPhase, startNativeAudioCapture, stopWakeRecognition]);
 
-  const stop = useCallback(() => {
-    if (sessionActiveRef.current || socketRef.current || sessionRef.current) finishSession("cancelled", "Listening cancelled.");
+  useEffect(() => {
+    beginConversationRef.current = startListening;
+  }, [startListening]);
+
+  /** Explicit first-use activation required by browser microphone policy. */
+  const activate = useCallback(async () => {
+    if (activatedRef.current && !mutedRef.current) return;
+    if (!navigator.mediaDevices?.getUserMedia && !browserSpeechRecognitionConstructor()) {
+      setVoiceSessionState("ERROR");
+      setState("error");
+      setError("Microphone capture is not supported in this browser.");
+      return;
+    }
+    activatedRef.current = true;
+    mutedRef.current = false;
+    setIsActivated(true);
+    setIsMuted(false);
+    setError(null);
+    setSessionOutcome(null);
+    setPhase("activating");
+    setVoiceSessionState("ACTIVATING");
+    // This happens inside the user gesture so Aegis can play a later response.
+    await player.prepare().catch(() => undefined);
+    beginWakeDetectionRef.current();
+  }, [player]);
+
+  const mute = useCallback(() => {
+    // Set this before finishing an active turn so finishSession releases the
+    // retained output context along with the microphone resources.
+    mutedRef.current = true;
+    activatedRef.current = true;
+    stopWakeRecognition();
+    setIsCapturing(false);
+    setCaptureMode(null);
+    if (sessionActiveRef.current || socketRef.current || sessionRef.current) finishSession("cancelled", null);
+    else {
+      conversationAudioBatcher.clear();
+      stopNativeAudioCapture();
+      stopRecognition();
+      void player.close();
+    }
+    setIsMuted(true);
+    setIsActivated(true);
+    setPhase("muted");
+    setVoiceSessionState("MUTED");
+    setState("off");
+  }, [conversationAudioBatcher, finishSession, player, stopNativeAudioCapture, stopRecognition, stopWakeRecognition]);
+
+  const unmute = useCallback(() => {
+    if (!activatedRef.current) {
+      void activate();
+      return;
+    }
+    mutedRef.current = false;
+    setIsMuted(false);
+    setError(null);
+    beginWakeDetectionRef.current();
+  }, [activate]);
+
+  const interrupt = useCallback(() => {
+    if (!sessionActiveRef.current || !player.isPlaying) return false;
+    player.stop();
+    send("interrupt");
+    nativeTransmissionActiveRef.current = false;
+    nativeSpeechFramesRef.current = 0;
+    nativeSilenceFramesRef.current = 0;
+    setIsUserSpeaking(false);
+    setPhase("listening");
+    setVoiceSessionState("LISTENING");
+    setState("listening");
+    return true;
+  }, [player, send, setPhase]);
+
+  const deactivate = useCallback(() => {
+    activatedRef.current = false;
+    mutedRef.current = false;
+    stopWakeRecognition();
+    setIsActivated(false);
+    setIsMuted(false);
+    setIsCapturing(false);
+    setCaptureMode(null);
+    if (sessionActiveRef.current || socketRef.current || sessionRef.current) finishSession("cancelled", null);
     else {
       conversationAudioBatcher.clear();
       closeAudibleAlert(true);
@@ -1203,7 +1587,10 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
       setPhase("idle");
       setState("off");
     }
-  }, [closeAudibleAlert, conversationAudioBatcher, finishSession, player, setPhase, stopNativeAudioCapture, stopRecognition]);
+    setVoiceSessionState("DISABLED");
+  }, [closeAudibleAlert, conversationAudioBatcher, finishSession, player, setPhase, stopNativeAudioCapture, stopRecognition, stopWakeRecognition]);
+
+  const stop = deactivate;
 
   // Kept as a compatibility alias for the existing voice core callers.
   const enableHandsFree = startListening;
@@ -1244,9 +1631,19 @@ export function useGeminiLiveVoice(callbacks: VoiceCallbacks = {}) {
     captureMode,
     isCapturing,
     sessionPhase,
+    voiceSessionState,
     sessionOutcome,
     sessionSecondsRemaining,
     sessionActive,
+    isActivated,
+    isMuted,
+    isUserSpeaking,
+    wakeWordMode,
+    activate,
+    deactivate,
+    mute,
+    unmute,
+    interrupt,
     startListening,
     enableHandsFree,
     beginPushToTalk,

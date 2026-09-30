@@ -78,6 +78,7 @@ export function CameraCommandCenter({ camera, cameraSwitcher }: { camera?: Camer
   const [loadedSnapshotCameraId, setLoadedSnapshotCameraId] = useState<string | null>(null);
   const [failedSnapshotGeneration, setFailedSnapshotGeneration] = useState<number | null>(null);
   const [socketState, setSocketState] = useState<SocketState>("idle");
+  const socketConnected = socketState === "connected";
   const [message, setMessage] = useState("");
   const [overlayMessage, setOverlayMessage] = useState("");
   const [showDetections, setShowDetections] = useState(true);
@@ -111,14 +112,18 @@ export function CameraCommandCenter({ camera, cameraSwitcher }: { camera?: Camer
   const recentActivity = useMemo(() => buildRecentActivity(events), [events]);
 
   useEffect(() => {
-    const canRefreshSnapshot = camera?.runtime.status === "online" && camera.runtime.running;
+    const cameraId = camera?.camera_id;
+    const hasFrameSocket = Boolean(cameraId && resolveCameraWebSocketUrl(cameraId, "frames"));
+    const canRefreshSnapshot = camera?.runtime.status === "online"
+      && camera.runtime.running
+      && (!hasFrameSocket || !socketConnected);
     if (!canRefreshSnapshot) return undefined;
     const timer = window.setInterval(
       () => setSnapshotGeneration((value) => value + 1),
       SNAPSHOT_PREVIEW_INTERVAL_MS,
     );
     return () => window.clearInterval(timer);
-  }, [camera?.camera_id, camera?.runtime.running, camera?.runtime.status]);
+  }, [camera?.camera_id, camera?.runtime.running, camera?.runtime.status, socketConnected]);
 
   useEffect(() => {
     const cameraId = camera?.camera_id;
@@ -180,7 +185,9 @@ export function CameraCommandCenter({ camera, cameraSwitcher }: { camera?: Camer
           if (parsed.data.type === "frame" && parsed.data.frame) {
             setFrame(parsed.data.frame);
             if (parsed.data.detections) {
-              setWsDetections(parsed.data.detections);
+              // A live frame must never paint the retained detection history.
+              // Keep this client-side guard for older API servers as well.
+              setWsDetections(filterCurrentDetections(parsed.data.detections));
             }
 
             // Async decode frame for precise canvas rendering
@@ -234,7 +241,7 @@ export function CameraCommandCenter({ camera, cameraSwitcher }: { camera?: Camer
       disposed = true;
       if (connectTimer !== undefined) window.clearTimeout(connectTimer);
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
-      if (socket?.readyState === WebSocket.OPEN) socket.close();
+      if (socket && socket.readyState === WebSocket.OPEN) socket.close();
     };
   }, [camera?.camera_id, camera?.runtime.running, camera?.runtime.status]);
 
@@ -438,13 +445,15 @@ function openSnapshot() {
   }
 
   const busy = startCamera.isPending || stopCamera.isPending;
-  const canUseSnapshot = camera.runtime.status === "online" && camera.runtime.running === true;
+  const cameraIsLive = camera.runtime.status === "online" && camera.runtime.running === true;
+  const hasFrameSocket = Boolean(resolveCameraWebSocketUrl(camera.camera_id, "frames"));
+  const canUseSnapshot = cameraIsLive && (!hasFrameSocket || !socketConnected);
   const snapshotFailed = failedSnapshotGeneration === snapshotGeneration;
-  const previewSource = canUseSnapshot && !snapshotFailed
-    ? frame || snapshotPreviewUrl(camera, snapshotGeneration)
+  const previewSource = cameraIsLive && !snapshotFailed
+    ? frame || (canUseSnapshot ? snapshotPreviewUrl(camera, snapshotGeneration) : "")
     : "";
   const usingSnapshotPreview = Boolean(previewSource && !frame);
-  const hasLivePreview = Boolean(frame && canUseSnapshot) || (canUseSnapshot && loadedSnapshotCameraId === camera.camera_id);
+  const hasLivePreview = Boolean(frame && cameraIsLive) || (canUseSnapshot && loadedSnapshotCameraId === camera.camera_id);
   const cameraStatus = cameraOperatorStatus(camera, socketState, summary, eventsQuery.isLoading || detectionsQuery.isLoading, eventsQuery.isError || detectionsQuery.isError, hasLivePreview);
   const connectionSignal = cameraConnectionSignal(camera, socketState, hasLivePreview);
   const riskSignal = cameraRiskSignal(summary.riskLevel);

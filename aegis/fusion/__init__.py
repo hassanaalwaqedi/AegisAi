@@ -1,7 +1,5 @@
-"""
-AegisAI - Fusion Intelligence Module
+"""Evidence-only fusion components used after detection and tracking."""
 
-Multi-model risk fusion for cloud-side deep analysis.
-Combines outputs from CLIP, SAM, MiDaS, and SlowFast
-into unified threat assessments.
-"""
+from aegis.fusion.threat_fusion import PersonThreatAssociation, ThreatFusionEngine
+
+__all__ = ["PersonThreatAssociation", "ThreatFusionEngine"]

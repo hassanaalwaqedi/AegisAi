@@ -6,20 +6,22 @@ const testState = vi.hoisted(() => ({
   callbacks: null as any,
   voice: {
     state: "off",
+    voiceSessionState: "DISABLED",
     error: null as string | null,
     waveformLevel: 0,
     playbackLevel: 0,
-    captureMode: null as "speech-recognition" | null,
     isCapturing: false,
     sessionActive: false,
-    sessionPhase: "idle" as "idle" | "listening" | "processing" | "response",
-    sessionOutcome: null as "cancelled" | "timeout" | null,
-    sessionSecondsRemaining: 0,
+    isActivated: false,
+    isMuted: false,
+    isUserSpeaking: false,
+    wakeWordMode: "browser-recognition",
+    activate: vi.fn(),
+    deactivate: vi.fn(),
+    mute: vi.fn(),
+    unmute: vi.fn(),
+    interrupt: vi.fn(),
     startListening: vi.fn(),
-    enableHandsFree: vi.fn(),
-    beginPushToTalk: vi.fn(),
-    endPushToTalk: vi.fn(),
-    sendTypedFallback: vi.fn(() => false),
     stop: vi.fn(),
   },
 }));
@@ -29,21 +31,16 @@ vi.mock("@/hooks/useGeminiLiveVoice", () => ({
     testState.callbacks = callbacks;
     return testState.voice;
   },
-  voiceStateLabel: (state: string) => ({
-    off: "Ready", connecting: "Connecting", ready: "Ready", listening: "Listening", thinking: "Thinking", speaking: "Aegis speaking", error: "Connection error",
-  }[state] ?? state),
 }));
 
 vi.mock("@/lib/live-voice", () => ({
   fetchLiveCapabilities: (...args: unknown[]) => testState.fetchCapabilities(...args),
 }));
 
-import VoiceCopilot from "./VoiceCopilot";
+import VoiceCopilot, { uniqueCitations } from "./VoiceCopilot";
 
 const liveCapability = {
   availability: "live" as const,
-  model: "gemini-live-test",
-  voice: "Kore",
   nativeAudio: true,
   inputTranscription: true,
   outputTranscription: true,
@@ -54,8 +51,8 @@ const liveCapability = {
 beforeEach(() => {
   testState.fetchCapabilities.mockResolvedValue(liveCapability);
   Object.assign(testState.voice, {
-    state: "off", error: null, waveformLevel: 0, playbackLevel: 0, captureMode: null, isCapturing: false,
-    sessionActive: false, sessionPhase: "idle", sessionOutcome: null, sessionSecondsRemaining: 0,
+    state: "off", voiceSessionState: "DISABLED", error: null, waveformLevel: 0, playbackLevel: 0,
+    isCapturing: false, sessionActive: false, isActivated: false, isMuted: false, isUserSpeaking: false, wakeWordMode: "browser-recognition",
   });
   Object.values(testState.voice).forEach((value) => {
     if (typeof value === "function" && "mockClear" in value) (value as ReturnType<typeof vi.fn>).mockClear();
@@ -65,74 +62,64 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-describe("VoiceCopilot", () => {
-  it("renders a truthful unavailable state rather than inventing a voice capability", async () => {
+describe("VoiceCopilot hands-free presence", () => {
+  it("deduplicates repeated event citations before rendering", () => {
+    const citations = uniqueCitations([
+      { evidenceId: "event-det-1", kind: "event", label: "Person detected", availability: "live", observedAt: "2026-09-26T10:00:00.000Z" },
+      { evidenceId: "event-det-1", kind: "event", label: "Person detected", availability: "live", observedAt: "2026-09-26T10:00:00.000Z" },
+    ]);
+
+    expect(citations).toHaveLength(1);
+    expect(citations[0].evidenceId).toBe("event-det-1");
+  });
+
+  it("keeps voice disabled truthfully when hands-free capability is unavailable", async () => {
     testState.fetchCapabilities.mockResolvedValue({ ...liveCapability, availability: "unavailable", reason: "GEMINI_API_KEY is not configured." });
     render(<VoiceCopilot contextAvailability="unavailable" contextReason="Live voice is unavailable." />);
 
-    await waitFor(() => expect(screen.getByText(/Voice unavailable:/i)).toHaveTextContent(/GEMINI_API_KEY/i));
-    expect(screen.getByRole("button", { name: /Ask Aegis/i })).toBeDisabled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Talk to Aegis" })).toBeDisabled());
+    expect(screen.getByText(/Voice is unavailable for this Aegis session/i)).toBeInTheDocument();
   });
 
-  it("shows the required voice state indicator and starts only after an explicit operator action", async () => {
+  it("starts listening from one direct operator click", async () => {
     render(<VoiceCopilot contextAvailability="live" />);
 
-    await waitFor(() => expect(screen.getByText("Ready")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: /Ask Aegis/i }));
-    expect(testState.voice.startListening).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Talk to Aegis" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Talk to Aegis" }));
+    expect(testState.voice.startListening).toHaveBeenCalledOnce();
+    expect(testState.voice.activate).not.toHaveBeenCalled();
   });
 
-  it("reports real listening and audio levels to the cinematic operator", async () => {
-    testState.voice.state = "listening";
-    testState.voice.waveformLevel = 0.42;
-    testState.voice.isCapturing = true;
-    testState.voice.sessionActive = true;
+  it("reports real hands-free session state and analyser levels to the operator", async () => {
+    Object.assign(testState.voice, {
+      state: "listening", voiceSessionState: "LISTENING", waveformLevel: 0.42,
+      isCapturing: true, sessionActive: true, isActivated: true, isUserSpeaking: true,
+    });
     const onActivity = vi.fn();
-
     render(<VoiceCopilot contextAvailability="live" onActivity={onActivity} />);
 
     await waitFor(() => expect(onActivity).toHaveBeenCalledWith({
-      state: "listening",
-      inputLevel: 0.42,
-      isCapturing: true,
-      outputLevel: 0,
-      sessionActive: true,
+      state: "listening", sessionState: "LISTENING", inputLevel: 0.42, outputLevel: 0, isCapturing: true, sessionActive: true,
     }));
+    expect(screen.getByText("Listening")).toBeInTheDocument();
   });
 
-  it("renders operator and Aegis transcripts with evidence citations", async () => {
+  it("shows only a transient cinematic subtitle, including grounded citations", async () => {
     render(<VoiceCopilot contextAvailability="live" />);
     await waitFor(() => expect(testState.callbacks).toBeTruthy());
-
     await act(async () => {
-      testState.callbacks.onTranscript({ speaker: "operator", text: "How many cameras are online?", isFinal: true });
-      testState.callbacks.onTranscript({ speaker: "aegis", text: "I have verified the camera runtime state.", isFinal: true });
       testState.callbacks.onCitations([{ evidenceId: "camera:gate-2", kind: "camera", label: "Gate 2", availability: "live", observedAt: "2026-07-30T12:00:00.000Z" }]);
+      testState.callbacks.onTranscript({ speaker: "aegis", text: "Camera two is open.", isFinal: true });
     });
-
-    expect(screen.getByText("How many cameras are online?")).toBeInTheDocument();
-    expect(screen.getByText(/verified the camera runtime/i)).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "Gate 2" }).length).toBeGreaterThan(0);
+    expect(screen.getByText("Camera two is open.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Gate 2" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Voice transcript")).not.toBeInTheDocument();
   });
 
-  it("stops audio/capture through the visible click-to-listen controls", async () => {
-    testState.voice.state = "speaking";
-    testState.voice.sessionActive = true;
+  it("keeps the single control unavailable while an active voice session owns the microphone", async () => {
+    Object.assign(testState.voice, { sessionActive: true, voiceSessionState: "LISTENING" });
     render(<VoiceCopilot contextAvailability="live" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: /Stop listening/i })).toBeEnabled());
-
-    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
-    expect(testState.voice.stop).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: /Stop listening/i }));
-    expect(testState.voice.startListening).toHaveBeenCalledTimes(1);
-  });
-
-  it("uses an explicit degraded message when the Live gateway reports an error", async () => {
-    testState.voice.state = "error";
-    testState.voice.error = "Gemini Live could not validate the configured model.";
-    render(<VoiceCopilot contextAvailability="live" />);
-
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/Microphone capture and audio playback have stopped/i));
-    expect(screen.getByText(/could not validate/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Talk to Aegis" })).toBeDisabled());
+    expect(screen.getByText("Aegis is listening")).toBeInTheDocument();
   });
 });

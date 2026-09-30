@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { BellOff, BellRing, ExternalLink, Keyboard, MessageSquareText, Mic, RotateCcw, Settings2, ShieldCheck, Square, X } from "lucide-react";
+import { BellOff, BellRing, ExternalLink, Keyboard, MessageSquareText, Mic, RotateCcw, Settings2, ShieldCheck, Square, Volume2, X } from "lucide-react";
 import { useTranslations } from "next-intl";
 
 import AIOrb from "@/components/intelligence/AIOrb";
@@ -29,6 +29,24 @@ type ConversationEntry = {
   text: string;
   citations: LiveCitation[];
 };
+
+/**
+ * Typed requests do not open a Gemini Live audio session. Speak their answer
+ * locally so every intentional assistant request still receives an audible
+ * response, while Live conversations continue to use Gemini's native PCM.
+ */
+function speakTypedReply(text: string) {
+  if (typeof window === "undefined" || !("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return false;
+  const reply = text.trim();
+  if (!reply) return false;
+
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(reply);
+  utterance.lang = document.documentElement.lang || navigator.language || "en-US";
+  utterance.rate = 1;
+  window.speechSynthesis.speak(utterance);
+  return true;
+}
 
 function coreStateFor(
   voiceState: Exclude<AegisVoiceCoreState, "degraded">,
@@ -228,7 +246,12 @@ export default function AegisVoiceCore({
 
   // The hook already owns resource cleanup. This second, idempotent guard
   // ensures the visual shell cannot leave an active session on route exit.
-  useEffect(() => () => stop(), [stop]);
+  useEffect(() => () => {
+    stop();
+    // This is only used for the typed-chat accessibility fallback; Gemini
+    // native audio has its own player lifecycle inside the voice hook.
+    if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
+  }, [stop]);
 
   const coreState = coreStateFor(voiceState, voiceError, contextAvailability, capability?.availability);
   const canUseVoice = contextAvailability === "live" && capability?.availability === "live";
@@ -283,6 +306,7 @@ export default function AegisVoiceCore({
         { id: `operator-${Date.now()}-${current.length}`, speaker: "operator" as const, text: message, citations: [] },
         { id: `aegis-${Date.now()}-${current.length + 1}`, speaker: "aegis" as const, text: response.answer, citations: [] },
       ].slice(-20));
+      speakTypedReply(response.answer);
       setTypedText("");
     } catch {
       setTypedError("Aegis could not complete that request. Try again.");
@@ -352,7 +376,7 @@ export default function AegisVoiceCore({
 
         {(sessionOutcome === "timeout" || sessionOutcome === "cancelled") && <span className="aegis-voice-status-badge" role="status">{sessionOutcome === "timeout" ? "Voice session timed out" : "Listening cancelled"}</span>}
         {latestOperatorText && sessionPhase === "listening" && <span className="sr-only" aria-live="polite">{latestOperatorText}</span>}
-        {latestResponse && <button type="button" onClick={openEvidenceDrawer} className="aegis-response-ready" aria-label="Open Conversation and Evidence">Response ready<span className="sr-only">{latestResponse}</span></button>}
+        {latestResponse && <div className="flex items-center gap-2"><button type="button" onClick={openEvidenceDrawer} className="aegis-response-ready" aria-label="Open Conversation and Evidence">Response ready<span className="sr-only">{latestResponse}</span></button><button type="button" onClick={() => speakTypedReply(latestResponse)} className="aegis-compact-button" aria-label="Replay Aegis response aloud"><Volume2 size={12} /> Replay</button></div>}
 
         <div className="aegis-compact-controls">
         {sessionActive && (

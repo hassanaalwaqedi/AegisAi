@@ -99,7 +99,7 @@ class GeminiFlashProvider(LLMProvider):
         from aegis.ai.gemini_client import GeminiClient, GeminiConfig
 
         resolved_key = api_key or os.getenv("GEMINI_API_KEY", "")
-        resolved_model = model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        resolved_model = model or os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
         self._client = GeminiClient(GeminiConfig(
             api_key=resolved_key,

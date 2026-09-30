@@ -30,7 +30,7 @@ _pipeline_lock = threading.Lock()
 
 
 def create_pipeline(
-    model_path: str = "yolo11n.pt",
+    model_path: Optional[str] = None,
     confidence: float = 0.5,
     device: str = "",
     auto_start: bool = False,
@@ -55,6 +55,9 @@ def create_pipeline(
         Configured Pipeline instance
     """
     global _pipeline
+    if model_path is None:
+        from aegis.settings import get_settings
+        model_path = get_settings().detection.model_path
 
     from aegis.pipeline.detection import DetectionStage
     from aegis.pipeline.tracking import TrackingStage

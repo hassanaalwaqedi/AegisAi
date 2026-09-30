@@ -17,6 +17,8 @@ export type LiveTrackingItem = {
   label: "Person" | "Vehicle" | "Tracked object";
   movement: TrackingMovement;
   movementLabel: string;
+  behaviorLabels: string[];
+  behaviorLabel: string;
   needsAttention: boolean;
   riskLabel: string | null;
   cameraId: string | null;
@@ -50,6 +52,8 @@ export function buildLiveTrackingItems(tracks: Track[], cameras: Camera[]): Live
       label: category === "person" ? "Person" : category === "vehicle" ? "Vehicle" : "Tracked object",
       movement: movementState(track),
       movementLabel: movementLabel(movementState(track)),
+      behaviorLabels: behaviorLabels(track),
+      behaviorLabel: behaviorLabel(behaviorLabels(track)),
       needsAttention: attentionLevels.has(String(track.risk_level ?? "").toUpperCase()),
       riskLabel: readableRisk(track.risk_level),
       cameraId,
@@ -126,6 +130,19 @@ function movementLabel(movement: TrackingMovement) {
   return "Information unavailable";
 }
 
+function behaviorLabels(track: Track) {
+  const source = track.behavior_labels ?? track.behaviors ?? [];
+  const labels = source
+    .filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
+    .map((value) => value.trim().replace(/_/g, " "));
+  return Array.from(new Set(labels));
+}
+
+function behaviorLabel(labels: string[]) {
+  if (!labels.length) return "Behavior unavailable";
+  return labels.map((label) => label.replace(/\b\w/g, (character) => character.toUpperCase())).join(", ");
+}
+
 function readableRisk(value: unknown) {
   const level = String(value ?? "").trim().toUpperCase();
   if (!level || level === "LOW") return null;
@@ -138,7 +155,10 @@ function readableRisk(value: unknown) {
 
 function timestampField(value: unknown) {
   if (typeof value !== "string" || !value.trim() || !Number.isFinite(Date.parse(value))) return null;
-  return value;
+  // Older API responses emitted UTC timestamps without an offset.  Treat
+  // those as UTC rather than allowing each browser to reinterpret them as
+  // local time (which made recent tracks appear hours old).
+  return /(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`;
 }
 
 function stringField(value: unknown, field: string) {

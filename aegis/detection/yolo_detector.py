@@ -53,6 +53,8 @@ class Detection(NamedTuple):
     is_animal: bool = False
     model_source: str = ""
     source_class_id: Optional[int] = None
+    detector: str = "general_yolo"
+    evidence_type: str = "general_detection"
 
 
 class YOLODetector:
@@ -212,7 +214,55 @@ class YOLODetector:
                 if self._available_class_ids is None
                 else "validated"
             ),
+            "runtime": self.get_runtime_metadata(),
         }
+
+    def get_runtime_metadata(self) -> dict:
+        """Return model facts from the instantiated object, never config echo."""
+        configured_path = str(self._config.model_path)
+        path = Path(configured_path)
+        metadata = {
+            "backend": "ultralytics-yolo",
+            "configured_path": configured_path,
+            "resolved_path": str(path.resolve()),
+            "model": path.name,
+            "ready": False,
+            "task": None,
+            "class_count": 0,
+            "classes": [],
+            "device": None,
+            "precision": None,
+            "architecture": None,
+            "error": self._model_load_error,
+        }
+        if self._model is None:
+            if not path.is_file() and metadata["error"] is None:
+                metadata["error"] = f"Base detector weights are unavailable: {path}"
+            return metadata
+
+        model = self._model
+        names = getattr(model, "names", {})
+        names = list(names.values()) if isinstance(names, dict) else list(names or [])
+        torch_model = getattr(model, "model", None)
+        parameters = getattr(torch_model, "parameters", None)
+        try:
+            precision = str(next(parameters()).dtype)
+        except (StopIteration, TypeError):
+            precision = None
+        yaml = getattr(torch_model, "yaml", {}) or {}
+        metadata.update({
+            "resolved_path": str(Path(getattr(model, "ckpt_path", path)).resolve()),
+            "model": Path(getattr(model, "ckpt_path", path)).name,
+            "ready": True,
+            "task": getattr(model, "task", None),
+            "class_count": len(names),
+            "classes": names,
+            "device": str(getattr(model, "device", self._device or "auto")),
+            "precision": precision,
+            "architecture": yaml.get("yaml_file") or yaml.get("scale"),
+            "error": None,
+        })
+        return metadata
     
     def detect(
         self,
@@ -317,6 +367,8 @@ class YOLODetector:
                     is_animal=is_animal,
                     model_source=self._config.model_path,
                     source_class_id=cls_id,
+                    detector="general_yolo",
+                    evidence_type="general_detection",
                 )
                 detections.append(detection)
         
@@ -412,6 +464,8 @@ class YOLODetector:
                         is_animal=is_animal,
                         model_source=self._config.model_path,
                         source_class_id=cls_id,
+                        detector="general_yolo",
+                        evidence_type="general_detection",
                     )
                     frame_detections.append(detection)
             

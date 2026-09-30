@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
+import { NextIntlClientProvider } from "next-intl";
+
+import messages from "../../../messages/en.json";
+
+vi.mock("@/i18n/routing", () => ({
+  Link: ({ href, children, ...props }: React.ComponentProps<"a">) => <a href={href} {...props}>{children}</a>,
+}));
 
 import { OperatorDashboard, operatorDashboardInternals } from "./operator-dashboard";
 import type { Camera, OperationalAlert, RiskEvent, StatusResponse } from "@/types";
@@ -42,6 +49,7 @@ const criticalEvent: RiskEvent = {
 function renderDashboard(overrides: Partial<React.ComponentProps<typeof OperatorDashboard>> = {}) {
   const onRetry = vi.fn();
   render(
+    <NextIntlClientProvider locale="en" messages={messages}>
     <OperatorDashboard
       cameras={[makeCamera(1), makeCamera(2), makeCamera(3, "offline"), makeCamera(4, "reconnecting")]}
       events={[criticalEvent]}
@@ -55,6 +63,7 @@ function renderDashboard(overrides: Partial<React.ComponentProps<typeof Operator
       onRetry={onRetry}
       {...overrides}
     />,
+    </NextIntlClientProvider>,
   );
   return { onRetry };
 }

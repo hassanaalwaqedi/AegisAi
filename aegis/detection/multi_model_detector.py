@@ -15,6 +15,7 @@ import numpy as np
 
 from config import AegisConfig, DetectionConfig
 from aegis.detection.weapon_detector import WeaponDetector
+from aegis.detection.yoloe_threat_detector import YOLOEThreatDetector
 from aegis.detection.yolo_detector import Detection, YOLODetector
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ class MultiModelDetector:
         detection_config: Optional[DetectionConfig] = None,
         person_detector: Optional[YOLODetector] = None,
         weapon_detector: Optional[WeaponDetector] = None,
+        threat_detector: Optional[YOLOEThreatDetector] = None,
         debug: Optional[bool] = None,
     ):
         if config is not None:
@@ -40,21 +42,34 @@ class MultiModelDetector:
 
         self.person_detector = person_detector or YOLODetector(config=config, detection_config=detection_config)
         self.weapon_detector = weapon_detector or WeaponDetector(config=config, detection_config=detection_config)
+        self.threat_detector = threat_detector or YOLOEThreatDetector(config=config, detection_config=detection_config)
         self._debug = self._config.weapon_debug_enabled if debug is None else debug
+        self._threat_frame_counter = 0
+        self.threat_executed_this_frame = False
 
     def detect(self, frame: np.ndarray) -> List[Detection]:
         person_detections = self.person_detector.detect(frame)
-        weapon_detections = self.weapon_detector.detect(frame)
+        weapon_detections = self.weapon_detector.detect(frame) if self._config.weapon_detector_enabled else []
         detections = self._merge_detections(person_detections, weapon_detections)
+        self._threat_frame_counter += 1
+        threat_detections: List[Detection] = []
+        self.threat_executed_this_frame = False
+        if self.threat_detector.enabled and (self._threat_frame_counter - 1) % self._config.threat_frame_skip == 0:
+            self.threat_executed_this_frame = True
+            threat_detections = self.threat_detector.detect(frame)
+            # Threat candidates retain their prompt labels and detector origin.
+            # They are intentionally not synonym-deduplicated in Phase 4.
+            detections.extend(threat_detections)
 
         if self._debug:
-            self._print_debug(person_detections, weapon_detections)
+            self._print_debug(person_detections, [*weapon_detections, *threat_detections])
 
         logger.debug(
-            "MultiModelDetector detections total=%s person_object=%s weapon=%s",
+            "MultiModelDetector detections total=%s person_object=%s weapon=%s threat_candidates=%s",
             len(detections),
             len(person_detections),
             len(weapon_detections),
+            len(threat_detections),
         )
         return detections
 
@@ -93,6 +108,14 @@ class MultiModelDetector:
         if "firearm" not in supported_families:
             unsupported_concepts.extend(["gun", "pistol"])
 
+        general_runtime = base_capabilities.get("runtime", {})
+        weapon_runtime = weapon_capabilities.get("runtime", {})
+        threat_capabilities = self.threat_detector.get_capabilities()
+        threat_runtime = threat_capabilities.get("runtime", {})
+        threat_enabled = bool(threat_capabilities.get("enabled"))
+        vision_ready = bool(general_runtime.get("ready")) and (
+            not threat_enabled or bool(threat_runtime.get("ready"))
+        )
         return {
             "model_name": person_config.model_path,
             "base_detector_available": base_available,
@@ -109,8 +132,10 @@ class MultiModelDetector:
                 "weapon_classes": base_weapon_classes,
                 "weapon_detection_supported": bool(base_weapon_classes),
                 "class_mapping_validation": base_capabilities.get("class_mapping_validation"),
+                "runtime": general_runtime,
             },
             "weapon_detector": {
+                "enabled": bool(self._config.weapon_detector_enabled),
                 "model_name": weapon_capabilities["model_name"],
                 "supported_classes": custom_weapon_classes,
                 "available_classes": available_custom_classes,
@@ -125,7 +150,16 @@ class MultiModelDetector:
                     else weapon_capabilities.get("disabled_reason")
                     or "Custom weapon detector weights are unavailable."
                 ),
+                "runtime": weapon_runtime,
             },
+            "threat_detector": {
+                "enabled": threat_enabled,
+                "supported_classes": threat_capabilities.get("supported_classes", []),
+                "threat_detection_supported": threat_capabilities.get("threat_detection_supported", False),
+                "runtime": threat_runtime,
+            },
+            "vision_status": "ready" if vision_ready else "degraded",
+            "general_detector": general_runtime,
             "action_recognition_supported": False,
             "pose_estimation_supported": False,
             "semantic_verification_supported": False,
@@ -205,4 +239,4 @@ class MultiModelDetector:
                 print(f"{display_name}: 0")
 
     def __repr__(self) -> str:
-        return f"MultiModelDetector(person={self.person_detector!r}, weapon={self.weapon_detector!r})"
+        return f"MultiModelDetector(person={self.person_detector!r}, weapon={self.weapon_detector!r}, threat={self.threat_detector!r})"

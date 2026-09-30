@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+from contextlib import AsyncExitStack
 import logging
 import os
 import secrets
@@ -438,7 +439,14 @@ async def run_live_gateway(websocket: WebSocket, session_id: str, connection_tok
     """Authenticate a browser socket and bridge it to one Gemini Live session."""
     manager = get_live_session_manager()
     origin = websocket.headers.get("origin")
-    allowed_origins = set(get_allowed_origins()) | {"http://localhost:3000", "http://127.0.0.1:3000"}
+    # Next development selects the next free port when 3000 is occupied.
+    # Permit the documented 3001 fallback as well as the primary local port,
+    # otherwise the browser's authenticated Live socket is rejected before it
+    # can reach Gemini even when the dashboard itself loaded successfully.
+    allowed_origins = set(get_allowed_origins()) | {
+        "http://localhost:3000", "http://127.0.0.1:3000",
+        "http://localhost:3001", "http://127.0.0.1:3001",
+    }
     if origin and origin not in allowed_origins:
         await websocket.close(code=4403)
         return
@@ -493,6 +501,7 @@ async def _bridge_gemini_session(
     voice = str(getattr(live, "voice", "")).strip()
     input_sample_rate = int(getattr(live, "input_sample_rate", 16_000))
     output_sample_rate = int(getattr(live, "output_sample_rate", 24_000))
+    connect_timeout_seconds = int(getattr(live, "connect_timeout_seconds", 12))
     max_session_seconds = int(getattr(live, "max_session_seconds", 900))
     if not api_key or not model or not voice:
         await emit(ServerVoiceEnvelope(type="error", code="LIVE_CONFIGURATION_INVALID", message="Gemini Live configuration is incomplete on the backend.", correlation_id=session.correlation_id))
@@ -669,7 +678,11 @@ async def _bridge_gemini_session(
             stopped.set()
 
     try:
-        async with client.aio.live.connect(model=model, config=live_config) as gemini_session:
+        async with AsyncExitStack() as stack:
+            gemini_session = await asyncio.wait_for(
+                stack.enter_async_context(client.aio.live.connect(model=model, config=live_config)),
+                timeout=max(3, min(connect_timeout_seconds, 60)),
+            )
             voice_session = GeminiLiveVoiceSession(
                 managed_session=session,
                 gemini_session=gemini_session,
@@ -705,6 +718,9 @@ async def _bridge_gemini_session(
                 exc = task.exception()
                 if exc and not isinstance(exc, WebSocketDisconnect):
                     raise exc
+    except TimeoutError:
+        logger.warning("Gemini Live connection timed out")
+        await emit(ServerVoiceEnvelope(type="error", code="GEMINI_LIVE_CONNECTION_TIMEOUT", message="Gemini Live did not become ready in time. The operator may retry the voice request.", recoverable=True, correlation_id=session.correlation_id))
     except Exception as exc:
         # Provider exceptions can contain transport details. Log only the type
         # so a credential can never be copied into application logs.

@@ -18,13 +18,14 @@ export function LanguageSwitcher() {
     <Link
       href={pathname}
       locale={targetLocale}
+      aria-label={label}
       className={cn(
-        "inline-flex min-h-9 items-center justify-center gap-2 rounded-md px-2 text-sm text-slate-300 transition hover:bg-white/10 hover:text-white sm:px-3"
+        "aegis-language-switcher"
       )}
       title={label}
     >
-      <Globe className="h-4 w-4" aria-hidden />
-      <span className="hidden sm:inline">{label}</span>
+      <Globe aria-hidden />
+      <span>{label}</span>
     </Link>
   );
 }

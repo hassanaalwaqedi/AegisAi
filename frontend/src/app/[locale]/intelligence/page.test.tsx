@@ -53,12 +53,25 @@ describe("Aegis Intelligence operator", () => {
   it("renders only values supplied by the intelligence contracts", () => {
     renderCenter();
     expect(screen.getByRole("heading", { name: "Aegis AI Operator" })).toBeInTheDocument();
-    expect(screen.getByText("1 / 2")).toBeInTheDocument();
-    expect(screen.getByText("42")).toBeInTheDocument();
-    expect(screen.getByText("Restricted-zone activity")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Cameras\. 1\/2 live\./ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Evidence\. 42 indexed\./ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Events\. 1 recent\./ })).toBeInTheDocument();
   });
 
-  it("executes a suggestion through the authenticated operator API and renders its real trace", async () => {
+  it("dispatches a real command from an intelligence-network node", async () => {
+    vi.mocked(executeOperatorCommand).mockResolvedValue({
+      action: "RISK_QUERY", intent: "Risk", answer: "Found 1 verified event record.", panel: "events", target: "/events?risk=high",
+      result: { events: [{ event_id: "event-1", message: "Restricted-zone activity", camera_id: "camera-1", risk_level: "HIGH", timestamp }] },
+      sources: [], trace: [], response_language: "English", error: null,
+    });
+    renderCenter();
+    fireEvent.click(screen.getByRole("button", { name: /Risk\. 1 active\./ }));
+    await waitFor(() => expect(executeOperatorCommand).toHaveBeenCalledWith("Show high-risk events", expect.anything(), expect.anything()));
+    expect(await screen.findByText("Found 1 verified event record.")).toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector(".operator-webgl-stage")).toHaveAttribute("data-operator-target", "risk"));
+  });
+
+  it("keeps text as a hidden fallback and executes it through the authenticated operator API", async () => {
     vi.mocked(executeOperatorCommand).mockResolvedValue({
       action: "RISK_QUERY", intent: "Risk", answer: "Found 1 verified event record.", panel: "events", target: "/events?risk=high",
       result: { events: [{ event_id: "event-1", message: "Restricted-zone activity", camera_id: "camera-1", risk_level: "HIGH", timestamp }] },
@@ -66,11 +79,15 @@ describe("Aegis Intelligence operator", () => {
       trace: [{ key: "understood", label: "Request understood", status: "completed" }], response_language: "English", error: null,
     });
     renderCenter();
-    fireEvent.click(screen.getByRole("button", { name: "Show high-risk events from the last hour" }));
+    expect(screen.queryByRole("textbox", { name: "Type a command for Aegis" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show high-risk events from the last hour" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Use text instead" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Type a command for Aegis" }), { target: { value: "Show high-risk events from the last hour" } });
+    fireEvent.click(screen.getByRole("button", { name: "Execute" }));
     await waitFor(() => expect(executeOperatorCommand).toHaveBeenCalled());
     expect(await screen.findByText("Found 1 verified event record.")).toBeInTheDocument();
     expect(screen.getByText("Request understood")).toBeInTheDocument();
-    expect(document.querySelector(".cinematic-intelligence")).toHaveAttribute("data-presence", "executing");
+    expect(document.querySelector(".cinematic-intelligence")).toHaveAttribute("data-operator-state", "PRESENTING");
     expect(document.querySelector(".cinematic-result-projection")).toBeInTheDocument();
   });
 });

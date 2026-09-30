@@ -1,5 +1,7 @@
 # AegisAI – Smart City Risk Intelligence System
 
+> **Historical project report:** This document describes an earlier phase of AegisAI. For current components, deployment limits, and evidence available today, see [Current Engineering Status](STATUS_REPORT.md). Do not treat phase completion or production-readiness statements below as current validation.
+
 ## Professional Project Report
 
 **Version:** 4.0.0  

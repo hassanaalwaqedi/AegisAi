@@ -1,5 +1,8 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { NextIntlClientProvider } from "next-intl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import messages from "../../../messages/en.json";
 
 import AIOrb from "./AIOrb";
 
@@ -25,7 +28,7 @@ afterEach(() => {
 
 describe("AIOrb", () => {
   it("exposes an accessible reduced-motion voice core state without inventing an audio waveform", async () => {
-    render(
+    render(withTranslations(
       <AIOrb
         contextStatus="live"
         voiceState="listening"
@@ -37,18 +40,18 @@ describe("AIOrb", () => {
         listeningEnabled
         voiceSessionActive={false}
       />,
-    );
+    ));
 
     const orb = screen.getByTestId("aegis-voice-orb");
     await waitFor(() => expect(orb).toHaveAttribute("data-reduced-motion", "true"));
     expect(orb).toHaveAttribute("data-voice-state", "listening");
     expect(orb).toHaveAttribute("data-active-capability", "cameras");
     expect(screen.getByRole("button", { name: /Aegis Voice Core/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Ask Aegis" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Ask" })).toBeInTheDocument();
   });
 
   it("uses a single accessible control to stop an active listening session", () => {
-    render(
+    render(withTranslations(
       <AIOrb
         contextStatus="live"
         voiceState="listening"
@@ -59,8 +62,12 @@ describe("AIOrb", () => {
         listeningEnabled
         voiceSessionActive
       />,
-    );
+    ));
 
     expect(screen.getByRole("button", { name: "Stop listening" })).toBeInTheDocument();
   });
 });
+
+function withTranslations(children: React.ReactNode) {
+  return <NextIntlClientProvider locale="en" messages={messages}>{children}</NextIntlClientProvider>;
+}

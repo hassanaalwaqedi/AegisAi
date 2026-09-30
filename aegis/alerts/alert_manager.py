@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, Hashable, List, Optional, Set
-from queue import Queue
+from queue import Full, Queue
 
 from aegis.alerts.alert_types import Alert, AlertLevel, AlertChannel, AlertSummary
 
@@ -92,6 +92,7 @@ class AlertManager:
         
         # API event queue (thread-safe)
         self._api_queue: Queue = Queue(maxsize=self._config.max_alerts_queue)
+        self._last_api_queue_overflow_warning: Optional[datetime] = None
         
         # Statistics
         self._stats = AlertSummary(start_time=datetime.now())
@@ -264,6 +265,29 @@ class AlertManager:
             alert.delivery_attempts += 1
             alert.delivered_at = datetime.now()
             alert.last_delivery_error = None
+        except Full:
+            # The durable alert store is the delivery source used by the API.
+            # Keep this legacy in-memory queue bounded and fresh rather than
+            # logging one exception per incoming alert after it reaches size.
+            try:
+                self._api_queue.get_nowait()
+                self._api_queue.put_nowait(alert)
+                alert.delivery_status = "queued"
+                alert.delivery_attempts += 1
+                alert.delivered_at = datetime.now()
+                alert.last_delivery_error = "Legacy in-memory delivery queue replaced its oldest entry."
+                now = datetime.now()
+                if (
+                    self._last_api_queue_overflow_warning is None
+                    or now - self._last_api_queue_overflow_warning >= timedelta(seconds=60)
+                ):
+                    self._last_api_queue_overflow_warning = now
+                    logger.warning("Alert API queue reached capacity; replacing oldest legacy queue entry.")
+            except Exception as exc:
+                alert.delivery_status = "failed"
+                alert.delivery_attempts += 1
+                alert.last_delivery_error = f"API queue unavailable: {type(exc).__name__}"
+                logger.error("Alert API queue dispatch failed event_id=%s: %s", alert.event_id, exc)
         except Exception as exc:
             # The durable record captures the delivery failure; losing an alert
             # silently is not acceptable for an operator workflow.

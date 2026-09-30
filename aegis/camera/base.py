@@ -8,6 +8,7 @@ VideoCapture loop base class with reconnection behavior.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 import time
@@ -36,6 +37,27 @@ from aegis.camera.utils import mask_url
 logger = logging.getLogger(__name__)
 
 
+def _bounded_preview_setting(name: str, default: int, minimum: int, maximum: int) -> int:
+    """Read a preview-only setting without letting it overwhelm capture."""
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def preview_encode_fps() -> int:
+    return _bounded_preview_setting("AEGIS_CAMERA_STREAM_FPS", 15, 1, 15)
+
+
+def preview_max_width() -> int:
+    return _bounded_preview_setting("AEGIS_CAMERA_PREVIEW_MAX_WIDTH", 960, 320, 1920)
+
+
+def preview_jpeg_quality() -> int:
+    return _bounded_preview_setting("AEGIS_CAMERA_PREVIEW_JPEG_QUALITY", 75, 45, 95)
+
+
 class BaseCameraSource:
     """Interface for all production camera sources."""
 
@@ -62,6 +84,7 @@ class BaseCameraSource:
         self._connected_since: Optional[datetime] = None
         self._fps_samples: Deque[float] = deque(maxlen=30)
         self._last_publish_ts: Optional[float] = None
+        self._last_preview_encode_ts: Optional[float] = None
         self._width: Optional[int] = None
         self._height: Optional[int] = None
 
@@ -171,20 +194,34 @@ class BaseCameraSource:
 
         height, width = frame.shape[:2]
 
-        # Optimize preview encode to prevent blocking the capture loop.
-        # Use 1280-wide cap so the live feed stays sharp on large monitors
-        # while still being much cheaper to encode than raw frames.
-        preview_frame = frame
-        if width > 1280:
-            scale = 1280 / width
-            preview_frame = cv2.resize(frame, (1280, int(height * scale)))
-
-        encode_ok, encoded = cv2.imencode(
-            ".jpg", preview_frame, [cv2.IMWRITE_JPEG_QUALITY, 85]
+        # Inference sees the original frame. The operator preview is a
+        # separately throttled, compact JPEG so costly encodes never turn into
+        # capture latency or a backlog of stale visual frames.
+        encode_interval = 1.0 / preview_encode_fps()
+        with self._frame_lock:
+            has_preview = self._latest_jpeg is not None
+        should_encode_preview = (
+            not has_preview
+            or self._last_preview_encode_ts is None
+            or now - self._last_preview_encode_ts >= encode_interval
         )
+        encoded_preview: Optional[bytes] = None
+        if should_encode_preview:
+            max_width = preview_max_width()
+            preview_frame = frame
+            if width > max_width:
+                scale = max_width / width
+                preview_frame = cv2.resize(frame, (max_width, int(height * scale)))
+            encode_ok, encoded = cv2.imencode(
+                ".jpg", preview_frame, [cv2.IMWRITE_JPEG_QUALITY, preview_jpeg_quality()]
+            )
+            if encode_ok:
+                encoded_preview = encoded.tobytes()
+                self._last_preview_encode_ts = now
         with self._frame_lock:
             self._latest_frame = frame.copy()
-            self._latest_jpeg = encoded.tobytes() if encode_ok else None
+            if encoded_preview is not None:
+                self._latest_jpeg = encoded_preview
             self._width = width
             self._height = height
             self._frames_received += 1

@@ -102,4 +102,18 @@ describe("LiveTrackingWorkspace", () => {
     expect(items[2]?.movementLabel).toBe("Information unavailable");
     expect(items[1]?.riskLabel).toBe("High priority");
   });
+
+  it("shows backend behavior labels and interprets legacy UTC timestamps correctly", () => {
+    const track: Track = {
+      ...personTrack,
+      behaviors: ["direction_reversal"],
+      first_seen: "2026-07-31T20:58:00",
+      last_seen: "2026-07-31T21:00:00",
+    };
+    const [item] = liveTrackingInternals.buildLiveTrackingItems([track], [liveCamera]);
+
+    expect(item?.behaviorLabel).toBe("Direction Reversal");
+    expect(item?.firstSeen).toBe("2026-07-31T20:58:00Z");
+    expect(item?.lastSeen).toBe("2026-07-31T21:00:00Z");
+  });
 });

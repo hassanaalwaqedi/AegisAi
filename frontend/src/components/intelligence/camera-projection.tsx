@@ -4,6 +4,10 @@ import { useEffect, useState } from "react";
 import { Camera } from "lucide-react";
 import { appConfig } from "@/lib/config";
 
+// Focus Mode receives a 15 FPS WebSocket stream. Grid thumbnails are context,
+// so refresh them less often and leave bandwidth/CPU to the selected camera.
+const THUMBNAIL_PREVIEW_INTERVAL_MS = 2_000;
+
 // Fetch serially so slow sources never accumulate requests or cancel every frame.
 export function CameraProjection({ cameraId, label }: { cameraId: string; label: string }) {
   const [frame, setFrame] = useState<string | null>(null);
@@ -26,7 +30,7 @@ export function CameraProjection({ cameraId, label }: { cameraId: string; label:
       } catch {
         if (!controller.signal.aborted) setUnavailable(true);
       } finally {
-        if (!controller.signal.aborted) timer = setTimeout(refresh, 700);
+        if (!controller.signal.aborted) timer = setTimeout(refresh, THUMBNAIL_PREVIEW_INTERVAL_MS);
       }
     };
     void refresh();

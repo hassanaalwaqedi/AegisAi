@@ -100,11 +100,14 @@ async def readiness(response: Response) -> dict:
 
         weapon_model_path = Path(detector_config.weapon_model_path)
         weapon_model_available = weapon_model_path.is_file()
+        weapon_enabled = bool(getattr(detector_config, "weapon_detector_enabled", True))
         checks["weapon_detector"] = {
-            "status": "ok" if weapon_model_available else "warning",
+            "status": "ok" if weapon_enabled and weapon_model_available else "skip" if not weapon_enabled else "warning",
             "message": (
                 f"Custom weapon detector weights available: {weapon_model_path.name}"
-                if weapon_model_available
+                if weapon_enabled and weapon_model_available
+                else "Legacy custom weapon detector disabled; YOLOE threat evidence is the configured production path."
+                if not weapon_enabled
                 else f"Custom weapon detector unavailable: {weapon_model_path}"
             ),
         }

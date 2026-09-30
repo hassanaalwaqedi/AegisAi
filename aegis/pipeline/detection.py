@@ -33,7 +33,7 @@ class DetectionStage(PipelineStage):
 
     def __init__(
         self,
-        model_path: str = "yolo11n.pt",
+        model_path: Optional[str] = None,
         confidence: float = 0.5,
         device: str = "",
         **kwargs,
@@ -44,6 +44,9 @@ class DetectionStage(PipelineStage):
             output_stream=Streams.DETECTIONS,
             **kwargs,
         )
+        if model_path is None:
+            from aegis.settings import get_settings
+            model_path = get_settings().detection.model_path
         self._model_path = model_path
         self._confidence = confidence
         self._device = device
@@ -85,6 +88,14 @@ class DetectionStage(PipelineStage):
                     _ = detector.weapon_detector.model
                 except Exception as exc:
                     logger.warning("Optional custom weapon model unavailable: %s", exc)
+            # Threat initialization is deliberately isolated: general vision
+            # remains operational when optional YOLOE assets are unavailable.
+            threat_detector = getattr(detector, "threat_detector", None)
+            if threat_detector is not None and threat_detector.enabled:
+                try:
+                    threat_detector.preload()
+                except Exception as exc:
+                    logger.warning("Optional YOLOE threat model unavailable: %s", exc)
             self._model_load_error = None
         except Exception as exc:
             self._model_load_error = f"{type(exc).__name__}: {exc}"
@@ -146,6 +157,8 @@ class DetectionStage(PipelineStage):
                         "is_animal": bool(getattr(det, "is_animal", False)),
                         "model_source": str(getattr(det, "model_source", "")),
                         "source_class_id": getattr(det, "source_class_id", None),
+                        "detector": str(getattr(det, "detector", "general_yolo")),
+                        "evidence_type": str(getattr(det, "evidence_type", "general_detection")),
                     })
 
                 results.append({
@@ -155,6 +168,7 @@ class DetectionStage(PipelineStage):
                     "detections": det_list,
                     "detection_count": len(det_list),
                     "inference_ms": round(inference_ms, 2),
+                    "threat_detector_executed": bool(getattr(detector, "threat_executed_this_frame", False)),
                     "_frame": frame,  # Pass frame reference downstream
                 })
 

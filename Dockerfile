@@ -13,6 +13,17 @@ ENV AEGIS_DEBUG=false
 ENV AEGIS_API_HOST=0.0.0.0
 ENV AEGIS_API_PORT=8080
 ENV YOLO_CONFIG_DIR=/tmp/Ultralytics
+ARG AEGIS_DETECTION_MODEL_PATH=/app/models/yolo11n.pt
+ENV AEGIS_DETECTION_MODEL_PATH=${AEGIS_DETECTION_MODEL_PATH}
+ARG AEGIS_BENCHMARK_MODEL_NAMES="yolo26n.pt yolo26s.pt"
+ENV AEGIS_BENCHMARK_MODEL_NAMES=${AEGIS_BENCHMARK_MODEL_NAMES}
+ARG AEGIS_THREAT_MODEL_PATH=/app/models/yoloe-26n-seg.pt
+ENV AEGIS_THREAT_MODEL_PATH=${AEGIS_THREAT_MODEL_PATH}
+ARG AEGIS_THREAT_PROMPT_EMBEDDINGS_PATH=/app/models/yoloe-26n-seg.threat-prompts.npz
+ENV AEGIS_THREAT_PROMPT_EMBEDDINGS_PATH=${AEGIS_THREAT_PROMPT_EMBEDDINGS_PATH}
+ARG AEGIS_THREAT_BENCHMARK_MODEL_NAMES="yoloe-26n-seg.pt yoloe-26s-seg.pt"
+ENV AEGIS_THREAT_BENCHMARK_MODEL_NAMES=${AEGIS_THREAT_BENCHMARK_MODEL_NAMES}
+ENV AEGIS_THREAT_CLASSES_JSON='["handgun","pistol","revolver","rifle","shotgun","knife","machete","baseball bat","crowbar"]'
 
 # Create non-root user
 RUN groupadd --gid 1000 aegis && \
@@ -30,6 +41,7 @@ RUN apt-get update --fix-missing \
     libsm6 \
     libxext6 \
     libxrender1 \
+    git \
     || (sleep 5 && apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 libsm6 libxext6 libxrender1) \
     && rm -rf /var/lib/apt/lists/*
@@ -40,13 +52,19 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# YOLOE needs this tokenizer only while prompt embeddings are generated during
+# the image build. Runtime loads those persisted embeddings and never prompts.
+RUN pip install --no-cache-dir git+https://github.com/ultralytics/CLIP.git@a13192f8cb767260d7dfd98c843b0716593169e7
+
 # Copy application code
 COPY --chown=aegis:aegis . .
 
-# Preload the exact base detector configured by the API. The detector refuses
-# to auto-download at runtime so readiness truthfully reports missing weights.
-RUN python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')" && \
-    chown aegis:aegis /app/yolo11n.pt
+# Provision the configured detector and explicitly named benchmark candidates
+# at image-build time. Application runtime only accepts local checkpoints and
+# never downloads or substitutes one.
+RUN mkdir -p /app/models && \
+    python scripts/provision_vision_models.py && \
+    chown -R aegis:aegis /app/models
 
 # Create data directories
 RUN mkdir -p /app/data/input /app/data/output && \

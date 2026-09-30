@@ -1,5 +1,7 @@
 # Aegis AI — Technical Evaluation Report
 
+> **Historical report:** This document records earlier architecture and estimates. For the current implementation and evidence limits, use [Current Engineering Status](STATUS_REPORT.md). In particular, performance figures here are not a current end-to-end benchmark, and the listed future cloud models are not validated production capabilities.
+
 **System**: Aegis AI – Real-Time Intelligent Surveillance System  
 **Version**: 4.0.0  
 **Date**: April 24, 2026  

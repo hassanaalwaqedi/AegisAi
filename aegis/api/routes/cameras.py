@@ -57,12 +57,44 @@ _camera_manager: Optional[MultiCameraPipelineManager] = None
 
 def camera_preview_interval_seconds() -> float:
     """Bound preview delivery without changing the detection pipeline."""
-    raw_value = os.getenv("AEGIS_CAMERA_STREAM_FPS", "30")
+    # Detection is coalesced independently of preview delivery, so a
+    # responsive operator view can use the 15 FPS local default without
+    # creating an inference backlog.
+    # Explicit configuration may raise it, but never beyond 15 FPS.
+    raw_value = os.getenv("AEGIS_CAMERA_STREAM_FPS", "15")
     try:
         frames_per_second = float(raw_value)
     except (TypeError, ValueError):
-        frames_per_second = 30.0
-    return 1.0 / max(1.0, min(frames_per_second, 30.0))
+        frames_per_second = 15.0
+    return 1.0 / max(1.0, min(frames_per_second, 15.0))
+
+
+def latest_frame_detections(detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return tracks that belong to the newest processed frame in a payload.
+
+    ``get_camera_detections`` retains a short history for operator review.  A
+    live frame overlay, however, must never draw that history over the newest
+    image.  Preserve the original payload only when frame identifiers are not
+    available so older integrations keep their existing behavior.
+    """
+
+    def frame_number(detection: Dict[str, Any]) -> Optional[int]:
+        value = detection.get("frame_number", detection.get("frame_id"))
+        try:
+            return None if value is None else int(value)
+        except (TypeError, ValueError):
+            return None
+
+    numbered_detections = [
+        (detection, number)
+        for detection in detections
+        if (number := frame_number(detection)) is not None
+    ]
+    if not numbered_detections:
+        return detections
+
+    newest_frame = max(number for _, number in numbered_detections)
+    return [detection for detection, number in numbered_detections if number == newest_frame]
 
 
 def get_camera_manager() -> MultiCameraPipelineManager:
@@ -634,10 +666,13 @@ async def camera_frames_websocket(websocket: WebSocket, camera_id: str):
 
             snapshot = manager.get_snapshot(camera_id)
             if snapshot:
-                # Embed the latest detections with every frame so that the
-                # client always renders boxes that belong to the same capture
-                # moment — eliminating stale-detection misalignment.
-                detections = manager.get_camera_detections(camera_id, limit=80)
+                # Detection history is valuable in the API, but a live image
+                # must contain only the most recent processed frame's boxes.
+                # Sending its history caused every previous box to be drawn
+                # over the next image in Focus Mode.
+                detections = latest_frame_detections(
+                    manager.get_camera_detections(camera_id, limit=80)
+                )
                 await websocket.send_json({
                     "type": "frame",
                     "camera_id": camera_id,

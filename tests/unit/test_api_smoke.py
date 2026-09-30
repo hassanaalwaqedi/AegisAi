@@ -22,12 +22,24 @@ _mock_modules = [
     "cv2", "ultralytics", "supervision",
     "torch", "torchvision", "mediapipe",
 ]
+_original_modules = {mod_name: sys.modules.get(mod_name) for mod_name in _mock_modules}
 for mod_name in _mock_modules:
     if mod_name not in sys.modules:
         sys.modules[mod_name] = types.ModuleType(mod_name)
 
 from aegis.api.app import create_app
 from fastapi.testclient import TestClient
+
+
+@pytest.fixture(scope="module", autouse=True)
+def restore_heavy_dependency_modules():
+    """Do not leave API-smoke substitutes in the process for later tests."""
+    yield
+    for mod_name, original_module in _original_modules.items():
+        if original_module is None:
+            sys.modules.pop(mod_name, None)
+        else:
+            sys.modules[mod_name] = original_module
 
 
 @pytest.fixture(scope="module")
