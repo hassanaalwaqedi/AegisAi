@@ -65,6 +65,7 @@ class LiveCitation(LiveModel):
     kind: Literal[
         "camera",
         "event",
+        "incident",
         "alert",
         "track",
         "detection",
@@ -79,7 +80,10 @@ class LiveCitation(LiveModel):
 
 
 class UICommandKind(str, Enum):
+    OPEN_WORKSPACE = "open_workspace"
+    CLOSE_OPERATOR_VIEW = "close_operator_view"
     OPEN_CAMERAS = "open_cameras"
+    OPEN_INCIDENT = "open_incident"
     SHOW_TRACK_EVIDENCE = "show_track_evidence"
     OPEN_SEMANTIC_EVIDENCE = "open_semantic_evidence"
     SHOW_RISK_EVIDENCE = "show_risk_evidence"
@@ -113,6 +117,7 @@ class ToolAuditRecord(LiveModel):
     session_id: str = Field(alias="sessionId")
     arguments: Dict[str, Any] = Field(default_factory=dict)
     result_status: Availability = Field(alias="resultStatus")
+    success: bool = True
     latency_ms: float = Field(alias="latencyMs")
     evidence_ids: List[str] = Field(default_factory=list, alias="evidenceIds")
     observed_at: datetime = Field(alias="observedAt")

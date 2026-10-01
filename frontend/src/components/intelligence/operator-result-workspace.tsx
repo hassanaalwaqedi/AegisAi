@@ -23,9 +23,18 @@ function numeric(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
+}
+
+function humanizeSignal(value: string): string {
+  return value.replaceAll("_", " ").toLowerCase().replace(/^./, (letter) => letter.toUpperCase());
+}
+
 export function OperatorResultWorkspace({ execution, onOpen, onFindSimilar, selectedId, onSelect, onRelated }: { execution: OperatorExecution | null; onOpen: (target: string) => void; onFindSimilar: (eventId: string) => void; selectedId?: string | null; onSelect?: (id: string) => void; onRelated?: () => void }) {
   const t = useTranslations("intelligence.operator");
   if (!execution) return <section className="operator-result-empty"><Radar aria-hidden /><h2>{t("workspaceReady")}</h2><p>{t("workspaceHint")}</p></section>;
+  const selectedRecord = selectedId ? resultRecords(execution).find((item) => recordId(item) === selectedId) : undefined;
 
   return <section className="operator-result" aria-live="polite">
     <header><div><small>{t("resultWorkspace")}</small><h2>{execution.answer}</h2></div><span>{execution.intent}</span></header>
@@ -33,7 +42,8 @@ export function OperatorResultWorkspace({ execution, onOpen, onFindSimilar, sele
     {resultRecords(execution).length > 1 && <div className="projection-selection" aria-label="Displayed results">{resultRecords(execution).map((item, index) => <button key={recordId(item) || index} type="button" aria-pressed={recordId(item) === selectedId} onClick={() => onSelect?.(recordId(item))}>Result {index + 1}</button>)}</div>}
     <ResultBody execution={selectedId && resultRecords(execution).some((item) => recordId(item) === selectedId) ? { ...execution, result: { ...execution.result, ...(execution.panel === "events" ? { events: resultRecords(execution).filter((item) => recordId(item) === selectedId) } : execution.panel === "evidence" ? { evidence: resultRecords(execution).filter((item) => recordId(item) === selectedId) } : execution.panel === "tracks" ? { tracks: resultRecords(execution).filter((item) => recordId(item) === selectedId) } : {}) } } : execution} onFindSimilar={onFindSimilar} />
     {selectedId && execution.panel === "events" && <button type="button" className="operator-open-workspace" onClick={onRelated}>Show related evidence</button>}
-    {selectedId && <dl className="projection-details">{Object.entries(resultRecords(execution).find((item) => recordId(item) === selectedId) || {}).filter(([key, value]) => ["event_id", "track_id", "camera_id", "timestamp", "risk_level", "risk_score", "bbox", "position", "zone", "zone_name"].includes(key) && value !== null && value !== undefined).map(([key, value]) => <div key={key}><dt>{key.replaceAll("_", " ")}</dt><dd>{typeof value === "object" ? JSON.stringify(value) : String(value)}</dd></div>)}</dl>}
+    {selectedRecord && <EvidenceRationale record={selectedRecord} />}
+    {selectedRecord && <dl className="projection-details">{Object.entries(selectedRecord).filter(([key, value]) => ["event_id", "incident_id", "track_id", "camera_id", "timestamp", "object_class", "risk_level", "risk_score", "detection_confidence", "verification_status", "bbox", "position", "zone", "zone_name"].includes(key) && value !== null && value !== undefined).map(([key, value]) => <div key={key}><dt>{key.replaceAll("_", " ")}</dt><dd>{typeof value === "object" ? JSON.stringify(value) : String(value)}</dd></div>)}</dl>}
     <div className="operator-trace"><small>{t("executionTrace")}</small>{execution.trace.map((step) => <span key={`${step.key}-${step.label}`} data-status={step.status}>{step.status === "error" ? <XCircle aria-hidden /> : <Check aria-hidden />}{step.label}</span>)}</div>
     {execution.target ? <button type="button" onClick={() => onOpen(execution.target! + (selectedId && execution.panel === "events" ? `${execution.target!.includes("?") ? "&" : "?"}event=${encodeURIComponent(selectedId)}` : ""))} className="operator-open-workspace"><ExternalLink aria-hidden />{t("openWorkspace")}</button> : null}
   </section>;
@@ -64,7 +74,7 @@ function ResultBody({ execution, onFindSimilar }: { execution: OperatorExecution
   }
   if (execution.panel === "events") {
     const events = records(execution.result.events);
-    return <div className="operator-result-list">{events.length ? events.map((item, index) => <article key={text(item.event_id) || text(item.id) || String(index)}><EventThumbnail event={item} /><div><strong>{text(item.message) || text(item.event_type) || t("event")}</strong><span>{text(item.camera_id) || t("cameraUnavailable")}</span><small>{text(item.timestamp) ? formatTime(text(item.timestamp)!) : t("timeUnavailable")} · {text(item.risk_level) || t("unclassified")}</small></div></article>) : <ResultUnavailable />}</div>;
+    return <div className="operator-result-list">{events.length ? events.map((item, index) => <article key={text(item.event_id) || text(item.id) || String(index)}><EventThumbnail event={item} /><div><strong>{text(item.reason) || text(item.message) || text(item.event_type) || t("event")}</strong><span>{text(item.camera_name) || text(item.camera_id) || t("cameraUnavailable")}</span><small>{text(item.timestamp) ? formatTime(text(item.timestamp)!) : t("timeUnavailable")} · {text(item.risk_level) || t("unclassified")}</small></div></article>) : <ResultUnavailable />}</div>;
   }
   if (execution.panel === "tracks") {
     const tracks = records(execution.result.tracks);
@@ -77,6 +87,20 @@ function ResultBody({ execution, onFindSimilar }: { execution: OperatorExecution
     return <div className="operator-health-grid">{checks.map((check, index) => <div key={text(check.name) || String(index)}><span>{text(check.name) || t("service")}</span><strong data-status={text(check.status) || "unavailable"}>{text(check.status) || t("unavailable")}</strong></div>)}</div>;
   }
   return execution.sources.length ? <div className="operator-sources">{execution.sources.map((source, index) => <span key={`${source.type}-${source.id || index}`}><ArrowUpRight aria-hidden />{source.label}</span>)}</div> : null;
+}
+
+function EvidenceRationale({ record }: { record: RecordValue }) {
+  const t = useTranslations("intelligence.operator");
+  const reason = text(record.reason) || text(record.message);
+  const signals = Array.from(new Set([...stringList(record.factors), ...stringList(record.reason_codes)])).slice(0, 6);
+  const status = text(record.verification_status);
+  if (!reason && signals.length === 0 && !status) return null;
+
+  return <section className="operator-evidence-rationale" aria-label={t("candidateReasonTitle")}>
+    <div><small>{t("candidateReasonTitle")}</small>{status ? <span>{t("verificationStatus")}: {humanizeSignal(status)}</span> : null}</div>
+    {reason ? <p>{reason}</p> : null}
+    {signals.length ? <ul>{signals.map((signal) => <li key={signal}>{humanizeSignal(signal)}</li>)}</ul> : null}
+  </section>;
 }
 
 function ResultUnavailable() {

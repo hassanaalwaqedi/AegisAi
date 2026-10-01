@@ -1,14 +1,12 @@
 "use client";
 
-import dynamic from "next/dynamic";
-
 import type { Availability } from "@/lib/intelligence-context";
 import type { OperatorAssetStatus, OperatorRuntime, ProjectionAnchor, ProjectionAnchorName } from "@/lib/operator-runtime";
+import { defaultProjectionAnchors } from "@/lib/operator-runtime";
+import { AegisCoreVisualization } from "./aegis-core-visualization";
+import { useEffect } from "react";
 
-const CinematicOperatorCanvas = dynamic(
-  () => import("./cinematic-operator-canvas").then((module) => module.CinematicOperatorCanvas),
-  { ssr: false, loading: () => <div className="operator-runtime-loading">Loading Aegis operator runtime…</div> },
-);
+const DEFAULT_ANCHORS = defaultProjectionAnchors();
 
 type IntelligenceCoreProps = {
   runtime: OperatorRuntime;
@@ -20,11 +18,20 @@ type IntelligenceCoreProps = {
 };
 
 /**
- * Visual shell around the rigged-GLB runtime. It intentionally contains no
- * image layer and no CSS transform that pretends to animate a character.
+ * Visual shell around the abstract Aegis Intelligence Core.
+ * Replaces the previous humanoid robot with a non-human central
+ * intelligence visualization.
  */
 export function IntelligenceCore({ runtime, status, statusLabel, stateLabel, onAnchors, onAssetStatus }: IntelligenceCoreProps) {
-  const voiceLevel = runtime.state === "SPEAKING" ? runtime.speakingLevel : runtime.listeningLevel;
+  // Provide default projection anchors (no rigging needed for abstract core)
+  useEffect(() => {
+    onAnchors(DEFAULT_ANCHORS);
+  }, [onAnchors]);
+
+  useEffect(() => {
+    onAssetStatus?.("ready");
+  }, [onAssetStatus]);
+
   return (
     <div
       className="cinematic-core"
@@ -34,21 +41,13 @@ export function IntelligenceCore({ runtime, status, statusLabel, stateLabel, onA
       data-status={status}
       data-presence={runtime.state.toLowerCase()}
       data-domain={runtime.intent}
-      style={{ "--voice-level": voiceLevel } as React.CSSProperties}
     >
-      <div className="cinematic-core-aura" aria-hidden />
-      <div className="cinematic-orbit cinematic-orbit-outer" aria-hidden />
-      <div className="cinematic-orbit cinematic-orbit-inner" aria-hidden />
-      <div className="cinematic-scan-plane" aria-hidden />
-      <div className="cinematic-data-streams" aria-hidden>{Array.from({ length: 12 }, (_, index) => <i key={index} />)}</div>
-      <CinematicOperatorCanvas runtime={runtime} onAnchors={onAnchors} onAssetStatus={onAssetStatus} />
-      <div className="cinematic-voice-ring" aria-hidden>
-        {Array.from({ length: 24 }, (_, index) => <i key={index} style={{ "--bar": index } as React.CSSProperties} />)}
-      </div>
-      <div className="cinematic-identity" data-contextual={runtime.state !== "IDLE"} aria-live="polite">
-        {runtime.state !== "IDLE" ? <strong>{stateLabel}</strong> : <i data-status={status} aria-hidden />}
-        {runtime.state === "WARNING" || runtime.state === "ERROR" ? <small>{statusLabel}</small> : null}
-      </div>
+      <AegisCoreVisualization
+        runtime={runtime}
+        status={status}
+        statusLabel={statusLabel}
+        stateLabel={stateLabel}
+      />
     </div>
   );
 }

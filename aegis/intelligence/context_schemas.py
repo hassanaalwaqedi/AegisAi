@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -172,6 +172,10 @@ class PipelineContext(ContextModel):
     running: Optional[bool] = None
     stages: List[PipelineStageContext] = Field(default_factory=list)
     freshness: Freshness
+    model: Optional[str] = None
+    inference_device: Optional[str] = Field(default=None, alias="inferenceDevice")
+    precision: Optional[str] = None
+    inference_performance: Dict[str, Any] = Field(default_factory=dict, alias="inferencePerformance")
 
 
 class VoiceCapability(ContextModel):

@@ -42,6 +42,8 @@ type LiveTrackingWorkspaceProps = {
   isUnavailable: boolean;
   camerasUnavailable: boolean;
   onRetry: () => void;
+  trackId?: string;
+  cameraId?: string;
 };
 
 const filters: Array<{ id: TrackingFilter; label: string }> = [
@@ -51,14 +53,15 @@ const filters: Array<{ id: TrackingFilter; label: string }> = [
   { id: "attention", label: "Needs attention" },
 ];
 
-export function LiveTrackingWorkspace({ tracks, cameras, isLoading, isUnavailable, camerasUnavailable, onRetry }: LiveTrackingWorkspaceProps) {
+export function LiveTrackingWorkspace({ tracks, cameras, isLoading, isUnavailable, camerasUnavailable, onRetry, trackId, cameraId }: LiveTrackingWorkspaceProps) {
   const [filter, setFilter] = useState<TrackingFilter>("all");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const allItems = useMemo(() => buildLiveTrackingItems(tracks, cameras), [tracks, cameras]);
   const items = useMemo(() => filterLiveTrackingItems(allItems, filter, search), [allItems, filter, search]);
   const summary = useMemo(() => liveTrackingSummary(allItems), [allItems]);
-  const selected = items.find((item) => item.id === selectedId) ?? items[0] ?? null;
+  const requestedTrack = trackId ? items.find((item) => (item.id === trackId || `${item.cameraId}:${item.id}` === trackId) && (!cameraId || item.cameraId === cameraId)) : undefined;
+  const selected = items.find((item) => item.id === selectedId) ?? (trackId ? requestedTrack ?? null : items[0] ?? null);
 
   if (isLoading) return <TrackingLoadingState />;
 

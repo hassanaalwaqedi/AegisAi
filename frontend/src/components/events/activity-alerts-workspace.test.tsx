@@ -67,6 +67,14 @@ describe("ActivityAlertsWorkspace", () => {
     expect(screen.getByRole("link", { name: /Open camera/i })).toHaveAttribute("href", "/en/cameras?camera=gate-2&view=focus");
   });
 
+  it("opens the event linked to an incident citation without selecting an unrelated event", () => {
+    const incidentEvent: RiskEvent = { ...highEvent, event_id: "incident-event", incident_id: "incident-17" };
+    render(<ActivityAlertsWorkspace cameras={[liveCamera]} events={[incidentEvent]} incidentId="incident-17" isLoading={false} isUnavailable={false} camerasUnavailable={false} onRetry={() => {}} />);
+
+    expect(screen.getByRole("button", { name: /North Gate/i })).toHaveAttribute("aria-current", "true");
+    expect(screen.getByRole("heading", { name: "North Gate" })).toBeInTheDocument();
+  });
+
   it("shows real camera-offline states without inventing visual evidence", () => {
     render(<ActivityAlertsWorkspace cameras={[offlineCamera]} events={[]} isLoading={false} isUnavailable={false} camerasUnavailable={false} onRetry={() => {}} />);
 

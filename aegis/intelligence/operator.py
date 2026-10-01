@@ -18,10 +18,9 @@ from aegis.ai.schemas import (
     SourceReference,
 )
 from aegis.ai.tools import get_active_tracks, get_camera_status, get_recent_events
+from aegis.intelligence.agent_control import control_camera_runtime, permission_manifest, workspace_target
 from aegis.intelligence.context_service import get_intelligence_context_service
-from aegis.semantic.evidence_search import EvidenceSearchRequest, SearchUnavailable, evidence_search, public_evidence
-from aegis.database.connection import get_db_session
-from aegis.database.repositories import EventRepository
+from aegis.semantic.evidence_search import EvidenceSearchRequest, SearchUnavailable, evidence_search
 
 
 logger = logging.getLogger(__name__)
@@ -101,6 +100,35 @@ def _trace(language: ResponseLanguage, source_key: str, count: int | None = None
     ]
 
 
+def _related_copy(language: ResponseLanguage, key: str, count: int) -> str:
+    text = {
+        ResponseLanguage.ENGLISH: {
+            "result": "Found {count} stored evidence records linked by incident, track, camera, or time.",
+            "fallback": "Semantic similarity is temporarily unavailable. Showing {count} operationally related stored records instead.",
+            "source": "Queried stored evidence relationships",
+        },
+        ResponseLanguage.ARABIC: {
+            "result": "تم العثور على {count} سجل أدلة مرتبط بالحادث أو المسار أو الكاميرا أو الوقت.",
+            "fallback": "التشابه الدلالي غير متاح مؤقتًا. يتم عرض {count} سجل تشغيلي مرتبط بدلًا منه.",
+            "source": "تم الاستعلام عن روابط الأدلة المحفوظة",
+        },
+        ResponseLanguage.TURKISH: {
+            "result": "Olay, iz, kamera veya zaman ile bağlantılı {count} kayıtlı kanıt bulundu.",
+            "fallback": "Anlamsal benzerlik geçici olarak kullanılamıyor. Bunun yerine operasyonel olarak ilişkili {count} kayıt gösteriliyor.",
+            "source": "Kayıtlı kanıt ilişkileri sorgulandı",
+        },
+    }[language][key]
+    return text.format(count=count)
+
+
+def _related_trace(language: ResponseLanguage, count: int):
+    return [
+        OperatorTraceStep(key="understood", label=_copy(language, "understood")),
+        OperatorTraceStep(key="source", label=f"{_related_copy(language, 'source', count)} · {count}"),
+        OperatorTraceStep(key="completed", label=_copy(language, "completed")),
+    ]
+
+
 def _time_cutoff(message: str) -> tuple[datetime | None, str | None]:
     lowered = message.casefold()
     now = datetime.now(timezone.utc)
@@ -175,6 +203,89 @@ def _camera_result(request: OperatorCommandRequest, language: ResponseLanguage):
     )
 
 
+def _camera_control_result(request: OperatorCommandRequest, language: ResponseLanguage):
+    lowered = request.message.casefold()
+    action = "stop" if any(term in lowered for term in ("stop", "disable", "pause", "أوقف", "ايقاف", "إيقاف", "عطل", "تعطيل")) else "start"
+    scope = "all" if any(term in lowered for term in ("all camera", "all monitoring", "every camera", "جميع الكاميرات", "كل الكاميرات", "المراقبة كاملة")) else "one"
+    camera_id = None
+    camera_label = None
+    if scope == "one":
+        payload = get_camera_status()
+        cameras = payload.get("cameras", []) if payload.get("availability") == "available" else []
+        camera = next((item for item in cameras if item.get("camera_id") and str(item["camera_id"]).casefold() in lowered), None)
+        if camera is None:
+            camera = next((item for item in cameras if item.get("name") and str(item["name"]).casefold() in lowered), None)
+        if camera is None and request.selected_camera_id:
+            camera = next((item for item in cameras if str(item.get("camera_id")) == request.selected_camera_id), None)
+        if camera is None:
+            number_match = re.search(r"(?:camera|cam|كاميرا)\s*#?\s*(\d+)", lowered)
+            if number_match:
+                number = int(number_match.group(1))
+                ordered = sorted(cameras, key=lambda item: str(item.get("camera_id")))
+                camera = next((item for item in cameras if str(item.get("camera_id")) == str(number)), None)
+                if camera is None and 1 <= number <= len(ordered):
+                    camera = ordered[number - 1]
+        if camera is None:
+            return OperatorExecutionResponse(
+                action="CAMERA_CONTROL", intent=Intent.CAMERA, panel="camera",
+                answer="Select or name a configured camera before changing its runtime state.",
+                result={"cameras": cameras, "permission": "autonomous_internal"},
+                response_language=language,
+            )
+        camera_id = str(camera["camera_id"])
+        camera_label = str(camera.get("name") or camera_id)
+
+    result = control_camera_runtime(action=action, scope=scope, camera_id=camera_id, actor_id="typed-aegis-operator")
+    changed = list(result.cameras)
+    subject = "all configured cameras" if scope == "all" else camera_label or camera_id or "camera"
+    verb = "Started" if action == "start" else "Stopped"
+    answer = f"{verb} {subject}. {result.succeeded} camera runtime action(s) completed."
+    if result.failures:
+        answer += f" {len(result.failures)} action(s) failed and require operator review."
+    target = "/cameras" if scope == "all" else f"/cameras?{urlencode({'camera': camera_id, 'view': 'focus'})}"
+    return OperatorExecutionResponse(
+        action="CAMERA_CONTROL", intent=Intent.CAMERA, panel="cameras", target=target,
+        answer=answer,
+        result={"cameras": changed, "failures": list(result.failures), "permission": "autonomous_internal", "action": action, "scope": scope},
+        sources=[SourceReference(type="camera", id=str(item.get("camera_id") or "") or None, label=str(item.get("name") or item.get("camera_id") or "camera")) for item in changed],
+        trace=_trace(language, "camera_source", len(changed)), response_language=language,
+    )
+
+
+def _workspace_result(message: str, language: ResponseLanguage):
+    lowered = message.casefold()
+    aliases = (
+        (("dashboard", "home", "الرئيسية", "لوحة التحكم"), "dashboard"),
+        (("cameras", "camera page", "صفحة الكاميرات"), "cameras"),
+        (("events", "event page", "صفحة الأحداث"), "events"),
+        (("tracks", "tracking page", "صفحة التتبع"), "tracks"),
+        (("evidence", "semantic", "الأدلة", "البحث الدلالي"), "evidence"),
+        (("analytics", "statistics", "التحليلات", "الإحصائيات"), "analytics"),
+        (("intelligence", "agent", "الذكاء", "الوكيل"), "intelligence"),
+    )
+    workspace = next((name for terms, name in aliases if any(term in lowered for term in terms)), None)
+    if workspace is None:
+        return None
+    target = workspace_target(workspace)
+    return OperatorExecutionResponse(
+        action="NAVIGATE_WORKSPACE", intent=Intent.GENERAL, panel="navigation", target=target,
+        answer=f"Opening the {workspace} workspace.",
+        result={"workspace": workspace, "permission": "autonomous_internal"},
+        trace=[OperatorTraceStep(key="understood", label=_copy(language, "understood")), OperatorTraceStep(key="completed", label=_copy(language, "completed"))],
+        response_language=language,
+    )
+
+
+def _protected_action_result(request: OperatorCommandRequest, language: ResponseLanguage):
+    return OperatorExecutionResponse(
+        action="CONFIRMATION_REQUIRED", intent=Intent.SETTINGS, panel="confirmation",
+        answer="This action can change or remove Aegis data or configuration and requires explicit human confirmation. Nothing was changed.",
+        result={"requires_confirmation": True, "requested_action": request.message[:200], "permissions": permission_manifest()},
+        trace=[OperatorTraceStep(key="understood", label=_copy(language, "understood")), OperatorTraceStep(key="permission", label="Human confirmation required", status="pending")],
+        response_language=language,
+    )
+
+
 def _event_result(request: OperatorCommandRequest, language: ResponseLanguage):
     events = get_recent_events(limit=100)
     cutoff, range_key = _time_cutoff(request.message)
@@ -208,11 +319,16 @@ def _evidence_result(request: OperatorCommandRequest, language: ResponseLanguage
     if "related" in request.message.casefold():
         if not request.previous_evidence_id:
             return OperatorExecutionResponse(action="EVIDENCE_SEARCH", intent=Intent.SEARCH, panel="evidence", answer="Select an event first so I can show its evidence.", result={"evidence": [], "total": 0}, response_language=language)
-        # Resolve the selected opaque ID again; never trust browser-supplied evidence.
-        with get_db_session() as session:
-            event = EventRepository(session).get_by_event_id(request.previous_evidence_id)
-            items = [public_evidence(event)] if event else []
-        return OperatorExecutionResponse(action="EVIDENCE_SEARCH", intent=Intent.SEARCH, panel="evidence", answer=_copy(language, "evidence", count=len(items)), result={"evidence": items, "total": len(items)}, target=f"/events?{urlencode({'event': request.previous_evidence_id})}", trace=_trace(language, "evidence_source", len(items)), response_language=language)
+        detail = evidence_search.detail(request.previous_evidence_id)
+        items = [detail["evidence"], *detail["related"]]
+        return OperatorExecutionResponse(
+            action="EVIDENCE_SEARCH", intent=Intent.SEARCH, panel="evidence",
+            answer=_related_copy(language, "result", len(items)),
+            result={"evidence": items, "total": len(items), "relationship_source": "incident_track_camera_time"},
+            sources=[SourceReference(type="event", id=item["event_id"], label=item.get("reason") or item.get("event_type") or item["event_id"]) for item in items],
+            target=f"/events?{urlencode({'event': request.previous_evidence_id})}",
+            trace=_related_trace(language, len(items)), response_language=language,
+        )
     similar = request.previous_evidence_id if "similar" in request.message.casefold() else None
     semantic_request = EvidenceSearchRequest(
         query="" if similar else request.message,
@@ -221,7 +337,27 @@ def _evidence_result(request: OperatorCommandRequest, language: ResponseLanguage
         risk_level="CRITICAL" if _risk_filter(request.message) == {"CRITICAL"} else None,
         page=1, page_size=8, min_similarity=0.18,
     )
-    search = evidence_search.search(semantic_request)
+    try:
+        search = evidence_search.search(semantic_request)
+    except (SearchUnavailable, LookupError):
+        if not similar:
+            raise
+        detail = evidence_search.detail(similar)
+        items = detail["related"]
+        return OperatorExecutionResponse(
+            action="EVIDENCE_SEARCH", intent=Intent.SEARCH, panel="evidence",
+            target=f"/events?{urlencode({'event': similar})}",
+            answer=_related_copy(language, "fallback", len(items)),
+            result={
+                "evidence": items,
+                "total": len(items),
+                "degraded": True,
+                "fallback": "operational_relationships",
+                "semantic_search_available": False,
+            },
+            sources=[SourceReference(type="event", id=item["event_id"], label=item.get("reason") or item.get("event_type") or item["event_id"]) for item in items],
+            trace=_related_trace(language, len(items)), response_language=language,
+        )
     items = search["results"]
     target = f"/semantic?{urlencode({'similar': similar})}" if similar else f"/semantic?{urlencode({'q': request.message})}"
     return OperatorExecutionResponse(
@@ -267,6 +403,24 @@ def execute_operator_command(request: OperatorCommandRequest) -> OperatorExecuti
     lowered = request.message.casefold()
     intent = classify_intent(request.message)
     try:
+        protected_action = (
+            re.search(r"\b(delete|remove|clear|erase|change|update|configure|export|send)\b|احذف|امسح|غيّر|غير|صدّر|ارسل", lowered)
+            and re.search(r"\b(camera|recording|history|alert|detection|configuration|security|credential|password|mode|data)\b|كاميرا|تسجيل|سجل|تنبيه|إعداد|أمان|كلمة مرور|بيانات", lowered)
+        )
+        if protected_action:
+            return _protected_action_result(request, language)
+        camera_control = (
+            any(term in lowered for term in ("start", "stop", "enable", "disable", "pause", "resume", "شغل", "تشغيل", "أوقف", "ايقاف", "إيقاف", "عطل", "تعطيل"))
+            and any(term in lowered for term in ("camera", "cam ", "monitoring", "كاميرا", "الكاميرات", "مراقبة", "المراقبة"))
+        )
+        if camera_control:
+            return _camera_control_result(request, language)
+        navigation_request = any(term in lowered for term in ("open", "go to", "navigate", "افتح", "انتقل", "اذهب"))
+        specific_camera = re.search(r"(?:camera|cam|كاميرا)\s*#?\s*[\w:-]+", lowered)
+        if navigation_request and not specific_camera:
+            workspace = _workspace_result(request.message, language)
+            if workspace is not None:
+                return workspace
         if any(term in lowered for term in _EVIDENCE_TERMS) and not any(term in lowered for term in ("open camera", "افتح الكاميرا")):
             return _evidence_result(request, language)
         if intent == Intent.CAMERA or any(term in lowered for term in ("camera", "cam ", "كاميرا")):

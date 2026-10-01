@@ -699,6 +699,11 @@ class FrameIngestionService:
         self._event_repository = None
         self._vehicle_enrichment_service = None
         self._vehicle_enrichment_lock = threading.Lock()
+        # VLM evidence is opt-in and held in a bounded JPEG ring buffer.  It
+        # is not part of detection, tracking, or the CV risk calculation.
+        self._vlm_evidence_buffer = None
+        self._vlm_evidence_lock = threading.Lock()
+        self._risk_recorder = None
         self._events: Deque[Dict[str, Any]] = deque(maxlen=event_buffer_size)
         self._detections: Deque[Dict[str, Any]] = deque(maxlen=event_buffer_size)
         self._emitted_detection_events: set[str] = set()
@@ -1057,6 +1062,22 @@ class FrameIngestionService:
             track_payloads=track_payloads,
         )
 
+        self._capture_vlm_evidence(
+            camera_id=camera_id,
+            frame=frame,
+            frame_id=frame_id,
+            captured_at=now,
+            risk_score=max_risk_score,
+            track_payloads=track_payloads,
+        )
+        self._record_risk_window(
+            camera_id=camera_id,
+            frame=frame,
+            frame_id=frame_id,
+            risk_score=max_risk_score,
+            track_payloads=track_payloads,
+        )
+
         for payload in track_payloads:
             # Composite threat context is copied onto the weapon track for
             # evidence display, but only the actor/person track may own the
@@ -1215,6 +1236,10 @@ class FrameIngestionService:
                 key for key in self._emitted_detection_events
                 if not str(key).startswith(camera_prefix)
             }
+        if self._vlm_evidence_buffer is not None:
+            self._vlm_evidence_buffer.clear_camera(camera_id)
+        if self._risk_recorder is not None:
+            self._risk_recorder.stop_camera(camera_id)
         if self._alert_manager is not None and hasattr(self._alert_manager, "clear_cooldowns"):
             self._alert_manager.clear_cooldowns(prefix=camera_prefix)
 
@@ -1329,8 +1354,10 @@ class FrameIngestionService:
             with self._detector_lock:
                 if self._detector is None:
                     from aegis.detection.multi_model_detector import MultiModelDetector
+                    from aegis.settings import get_settings
 
-                    self._detector = MultiModelDetector()
+                    settings = get_settings()
+                    self._detector = MultiModelDetector(device=settings.get_device_string())
         return self._detector
 
     def _get_tracker(self, camera_id: str):
@@ -2154,6 +2181,12 @@ class FrameIngestionService:
             "event_type": event_type,
             "camera_id": camera_id,
             "track_id": track_payload.get("track_id"),
+            "track_ids": list(dict.fromkeys(str(item) for item in (
+                track_payload.get("track_id"),
+                track_payload.get("person_track_id"),
+                track_payload.get("weapon_track_id"),
+                track_payload.get("nearby_person_track_id"),
+            ) if item is not None)),
             "timestamp": timestamp.isoformat(),
             "severity": severity,
             "risk_level": risk_level,
@@ -2186,7 +2219,8 @@ class FrameIngestionService:
             "threat_context": track_payload.get("threat_context"),
             "detected_objects": [class_name],
             "detected_classes": [class_name],
-            "behavior_labels": [],
+            "behavior_labels": list(track_payload.get("behavior_labels") or track_payload.get("behaviors") or []),
+            "factors": list(track_payload.get("risk_factors") or []),
             "frame_number": frame_number,
             "frame_id": frame_number,
             "title": event_type,
@@ -2195,6 +2229,32 @@ class FrameIngestionService:
             "reason": explanation,
             "snapshot_path": None,
         }
+        # Ambiguous risk events are durably recorded as candidates when VLM is
+        # enabled. They are not correlated into incidents until verification
+        # satisfies the explicit promotion policy.
+        try:
+            from aegis.settings import get_settings
+            vlm_settings = get_settings().vlm
+            levels = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+            ambiguous = verification_status in {"candidate", "needs_verification"}
+            eligible_candidate = (
+                vlm_settings.enabled
+                and vlm_settings.verify_candidates
+                and vlm_settings.allows_camera(camera_id)
+                and ambiguous
+                and float(event_payload["risk_score"]) >= vlm_settings.candidate_min_risk_score
+                and levels.get(risk_level, -1) >= levels[vlm_settings.candidate_min_severity]
+            )
+            if eligible_candidate:
+                event_payload["vlm_candidate"] = True
+                event_payload["evidence_status"] = "pending"
+                persisted = self._persist_event(event_payload, correlate=False)
+                event_payload["evidence_status"] = "persisted" if persisted else "failed"
+                if persisted:
+                    event_payload["evidence_id"] = event_id
+                    self._schedule_vlm_verification(event_payload)
+        except Exception as exc:
+            logger.warning("VLM candidate persistence skipped event_id=%s error=%s", event_id, type(exc).__name__)
         self._events.append(event_payload)
         get_state().add_event(event_payload)
         return event_payload
@@ -2367,6 +2427,7 @@ class FrameIngestionService:
         if persisted:
             event_payload["evidence_id"] = event_payload.get("evidence_id") or event_id
             event_payload["evidence_status"] = "persisted"
+            self._schedule_vlm_verification(event_payload)
             persist_alert = getattr(alert_manager, "persist_alert", None)
             if alert is not None and callable(persist_alert):
                 alert_persisted = persist_alert(
@@ -2480,7 +2541,7 @@ class FrameIngestionService:
             logger.warning("Failed to save event snapshot event_id=%s: %s", event_id, exc)
         return EventSnapshot(path=None, status="failed")
 
-    def _persist_event(self, event: Dict[str, Any]) -> bool:
+    def _persist_event(self, event: Dict[str, Any], *, correlate: bool = True) -> bool:
         try:
             from aegis.database.connection import get_db_session
             from aegis.database.persistence import get_persistence_status
@@ -2495,7 +2556,7 @@ class FrameIngestionService:
             with get_db_session() as session:
                 persisted_event, created = EventRepository(session).create_or_get_evidence(
                     event_id=str(event["event_id"]),
-                    event_type="risk_alert",
+                    event_type=str(event.get("event_type") if event.get("vlm_candidate") else "risk_alert"),
                     message=event["explanation"],
                     timestamp=datetime.fromisoformat(event["timestamp"]),
                     track_id=track_id,
@@ -2525,6 +2586,10 @@ class FrameIngestionService:
                 # evidence.  A failed incident write must never roll back the
                 # alert evidence or interrupt the camera pipeline.
                 try:
+                    if not correlate:
+                        event["evidence_id"] = persisted_event.event_id
+                        get_persistence_status().record_success("camera_ingestion")
+                        return True
                     from aegis.intelligence.incident_correlation import IncidentCorrelationService
 
                     with session.begin_nested():
@@ -2559,6 +2624,151 @@ class FrameIngestionService:
                 pass
             logger.warning("Event repository persistence failed: %s", exc)
             return False
+
+    def _capture_vlm_evidence(
+        self,
+        *,
+        camera_id: str,
+        frame: np.ndarray,
+        frame_id: int,
+        captured_at: datetime,
+        risk_score: float,
+        track_payloads: List[Dict[str, Any]],
+    ) -> None:
+        """Keep small local evidence only while visual verification is enabled."""
+        try:
+            from aegis.settings import get_settings
+            settings = get_settings().vlm
+            if not settings.enabled or not settings.allows_camera(camera_id):
+                return
+            with self._vlm_evidence_lock:
+                if self._vlm_evidence_buffer is None:
+                    from aegis.intelligence.vlm_verifier import EvidenceFrameBuffer
+                    self._vlm_evidence_buffer = EvidenceFrameBuffer(
+                        max_frames=settings.buffer_frames,
+                        jpeg_quality=settings.jpeg_quality,
+                    )
+                buffer = self._vlm_evidence_buffer
+            signals = [factor for payload in track_payloads for factor in payload.get("risk_factors", [])]
+            buffer.capture(
+                camera_id,
+                frame,
+                risk_score=risk_score,
+                track_ids=[payload.get("track_id") for payload in track_payloads],
+                signals=signals,
+                frame_id=frame_id,
+                captured_at=captured_at,
+            )
+        except Exception as exc:
+            logger.debug("VLM evidence buffer unavailable camera_id=%s: %s", camera_id, type(exc).__name__)
+
+    def _schedule_vlm_verification(self, event: Dict[str, Any]) -> None:
+        """Hand a persisted incident or qualified event candidate to the sidecar."""
+        incident_id = str(event.get("incident_id") or "").strip()
+        is_candidate = bool(event.get("vlm_candidate"))
+        if (not incident_id and not is_candidate) or self._vlm_evidence_buffer is None:
+            return
+        try:
+            from aegis.settings import get_settings
+            settings = get_settings().vlm
+            if not settings.enabled:
+                return
+            if not settings.allows_camera(str(event.get("camera_id") or "")):
+                return
+            if is_candidate and not settings.verify_candidates:
+                return
+            if not is_candidate and not settings.verify_incidents:
+                return
+            from aegis.intelligence.vlm_verifier import IncidentEvidencePackage, get_vlm_verifier
+            timestamp = datetime.fromisoformat(str(event["timestamp"]).replace("Z", "+00:00"))
+            event_snapshot = dict(event)
+            event_frame_value = event_snapshot.get("frame_number", event_snapshot.get("frame_id"))
+            try:
+                event_frame_id = int(event_frame_value) if event_frame_value is not None else None
+            except (TypeError, ValueError):
+                event_frame_id = None
+            package = IncidentEvidencePackage(
+                incident_id=incident_id or None,
+                camera_id=str(event_snapshot["camera_id"]),
+                event_id=str(event_snapshot["event_id"]),
+                start_time=timestamp,
+                end_time=timestamp,
+                risk_score=float(event_snapshot.get("risk_score") or 0.0),
+                risk_level=str(event_snapshot.get("risk_level") or "LOW"),
+                tracks=tuple(str(item) for item in (
+                    event_snapshot.get("track_ids")
+                    or [event_snapshot.get("track_id"), *(event_snapshot.get("related_track_ids") or [])]
+                ) if item),
+                cv_detections=tuple(),
+                behavior_signals=tuple(str(item) for item in event_snapshot.get("factors", [])),
+                risk_explanation=str(event_snapshot.get("explanation") or ""),
+                keyframes=tuple(),
+                video_clip=event_snapshot.get("clip_path"),
+                event_type=str(event_snapshot.get("event_type") or "risk_alert"),
+                is_candidate=is_candidate,
+                event_frame_id=event_frame_id,
+            )
+            def build_evidence_package() -> IncidentEvidencePackage:
+                if event_frame_id is not None:
+                    self._vlm_evidence_buffer.wait_for_post_frames(
+                        event_snapshot["camera_id"],
+                        event_frame_id=event_frame_id,
+                        minimum_after=2,
+                        timeout_seconds=min(10.0, max(1.0, settings.post_event_seconds)),
+                    )
+                keyframes = self._vlm_evidence_buffer.select(
+                    event_snapshot["camera_id"],
+                    max_keyframes=settings.max_keyframes,
+                    event_frame_id=event_frame_id,
+                )
+                return IncidentEvidencePackage(
+                    **{
+                        **package.__dict__,
+                        "start_time": keyframes[0].timestamp if keyframes else timestamp,
+                        "end_time": keyframes[-1].timestamp if keyframes else timestamp,
+                        "keyframes": tuple(keyframes),
+                    }
+                )
+
+            verification_id = get_vlm_verifier().schedule_deferred(
+                package,
+                build_evidence_package,
+                delay_seconds=settings.post_event_seconds,
+            )
+            event["vlm_verification_id"] = verification_id
+        except Exception as exc:
+            # The risk alert already exists; never let this secondary sidecar
+            # turn a healthy CV event into a failed camera frame.
+            logger.warning("VLM scheduling failed incident_id=%s event_id=%s: %s", incident_id or None, event.get("event_id"), type(exc).__name__)
+
+    def _record_risk_window(
+        self,
+        *,
+        camera_id: str,
+        frame: np.ndarray,
+        frame_id: int,
+        risk_score: float,
+        track_payloads: List[Dict[str, Any]],
+    ) -> None:
+        """Wire the existing recorder at a bounded sample rate, never inline IO."""
+        try:
+            from aegis.settings import get_settings
+            settings = get_settings().vlm
+            if not settings.enabled or not settings.allows_camera(camera_id) or frame_id % 6:
+                return
+            if self._risk_recorder is None:
+                from aegis.recording.risk_recorder import MultiCameraRecorder, RecorderConfig
+                self._risk_recorder = MultiCameraRecorder(RecorderConfig(
+                    start_threshold=settings.min_risk_score,
+                    pre_buffer_seconds=settings.pre_event_seconds,
+                    stop_cooldown_seconds=settings.post_event_seconds,
+                    target_fps=5,
+                    max_event_seconds=30.0,
+                ))
+            detections = [{"class_name": item.get("class_name")} for item in track_payloads]
+            self._risk_recorder.process_frame(camera_id, frame, risk_score, detections)
+        except Exception as exc:
+            logger.debug("Risk recorder sidecar unavailable camera_id=%s: %s", camera_id, type(exc).__name__)
 
     def _frame_explanation(self, tracks: List[Dict[str, Any]]) -> str:
         if not tracks:

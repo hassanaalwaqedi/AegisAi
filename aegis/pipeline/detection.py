@@ -69,6 +69,7 @@ class DetectionStage(PipelineStage):
                             model_path=self._model_path,
                             confidence_threshold=self._confidence,
                         ),
+                        device=self._device,
                     )
                     logger.info(
                         "Detection model loaded path=%s device=%s",

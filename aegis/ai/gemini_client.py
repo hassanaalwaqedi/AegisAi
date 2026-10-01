@@ -15,9 +15,11 @@ Copyright 2024 AegisAI Project
 
 import os
 import json
+import base64
 import logging
 import time
-from typing import Optional, Dict, List, Any, Union
+from pathlib import Path
+from typing import Optional, Dict, List, Any, Union, Type
 from dataclasses import dataclass, field
 from functools import lru_cache
 
@@ -112,7 +114,7 @@ class GeminiClient:
     
     def _get_endpoint(self, action: str = "generateContent") -> str:
         """Get the API endpoint URL."""
-        return f"{self.BASE_URL}/{self.config.model}:{action}?key={self.config.api_key}"
+        return f"{self.BASE_URL}/{self.config.model}:{action}"
     
     def generate(
         self,
@@ -190,7 +192,10 @@ class GeminiClient:
                 response = requests.post(
                     endpoint,
                     json=body,
-                    headers={"Content-Type": "application/json"},
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-goog-api-key": self.config.api_key,
+                    },
                     timeout=self.config.timeout
                 )
                 
@@ -303,6 +308,121 @@ class GeminiClient:
             logger.error(f"Failed to parse JSON: {e}")
             logger.debug(f"Raw response: {response.text}")
             raise GeminiError(f"Invalid JSON response: {e}")
+
+    def analyze_images(
+        self,
+        prompt: str,
+        images: List[Union[bytes, bytearray, Path, str]],
+        *,
+        system_prompt: Optional[str] = None,
+        response_schema: Optional[Union[Dict[str, Any], Type[Any]]] = None,
+        image_mime_type: str = "image/jpeg",
+    ) -> Dict[str, Any]:
+        """Analyze one or more local images and return structured JSON.
+
+        The method uses Gemini's REST ``inlineData`` representation so image
+        bytes remain inside this request only.  Callers must pass selected
+        incident evidence, never a live camera stream.
+        """
+        if not images:
+            raise GeminiError("At least one image is required for visual analysis.")
+        parts: List[Dict[str, Any]] = [{"text": prompt}]
+        for image in images:
+            if isinstance(image, (str, Path)):
+                payload = Path(image).read_bytes()
+            elif isinstance(image, (bytes, bytearray)):
+                payload = bytes(image)
+            else:
+                raise GeminiError("Image inputs must be bytes or local paths.")
+            if not payload:
+                raise GeminiError("Image input is empty.")
+            parts.append({
+                "inlineData": {
+                    "mimeType": image_mime_type,
+                    "data": base64.b64encode(payload).decode("ascii"),
+                }
+            })
+        return self._generate_multimodal_json(
+            parts=parts,
+            system_prompt=system_prompt,
+            response_schema=response_schema,
+        )
+
+    def analyze_video(
+        self,
+        prompt: str,
+        video: Union[bytes, bytearray, Path, str],
+        *,
+        system_prompt: Optional[str] = None,
+        response_schema: Optional[Union[Dict[str, Any], Type[Any]]] = None,
+        video_mime_type: str = "video/mp4",
+    ) -> Dict[str, Any]:
+        """Analyze a short local video clip with structured output.
+
+        The caller owns file-size policy and may fall back to keyframes when
+        a provider/account does not support inline video.
+        """
+        payload = Path(video).read_bytes() if isinstance(video, (str, Path)) else bytes(video)
+        if not payload:
+            raise GeminiError("Video input is empty.")
+        return self._generate_multimodal_json(
+            parts=[
+                {"text": prompt},
+                {"inlineData": {"mimeType": video_mime_type, "data": base64.b64encode(payload).decode("ascii")}},
+            ],
+            system_prompt=system_prompt,
+            response_schema=response_schema,
+        )
+
+    def verify_incident(
+        self,
+        prompt: str,
+        images: List[Union[bytes, bytearray, Path, str]],
+        *,
+        response_schema: Optional[Union[Dict[str, Any], Type[Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Explicit incident-verification entry point retained for auditing."""
+        return self.analyze_images(
+            prompt,
+            images,
+            system_prompt=(
+                "You are a secondary visual verifier. Describe only visible "
+                "evidence; do not infer intent, identity, guilt, or facts not visible."
+            ),
+            response_schema=response_schema,
+        )
+
+    def _generate_multimodal_json(
+        self,
+        *,
+        parts: List[Dict[str, Any]],
+        system_prompt: Optional[str],
+        response_schema: Optional[Union[Dict[str, Any], Type[Any]]],
+    ) -> Dict[str, Any]:
+        """Send visual parts with Gemini's JSON MIME type and optional schema."""
+        contents: List[Dict[str, Any]] = []
+        if system_prompt:
+            contents.append({"role": "user", "parts": [{"text": f"System: {system_prompt}"}]})
+            contents.append({"role": "model", "parts": [{"text": "Understood."}]})
+        contents.append({"role": "user", "parts": parts})
+        generation_config: Dict[str, Any] = {
+            "temperature": 0.0,
+            "maxOutputTokens": self.config.max_tokens,
+            "responseMimeType": "application/json",
+        }
+        if response_schema:
+            schema = response_schema
+            if hasattr(schema, "model_json_schema"):
+                schema = schema.model_json_schema()
+            generation_config["responseJsonSchema"] = schema
+        started = time.time()
+        response = self._make_request({"contents": contents, "generationConfig": generation_config})
+        self._request_count += 1
+        parsed = self._parse_response(response, (time.time() - started) * 1000)
+        try:
+            return json.loads(parsed.text)
+        except json.JSONDecodeError as exc:
+            raise GeminiError(f"Invalid JSON response: {exc}") from exc
     
     def chat(
         self,

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { executeOperatorCommand, type OperatorExecution } from "@/lib/operator-api";
-import { projectionDomain, recordId, resultRecords, selectedOrdinal, wantsFullView } from "@/lib/operator-scene";
+import { projectionDomain, recordId, resultRecords, selectedOrdinal, wantsCloseOperatorView, wantsFullView } from "@/lib/operator-scene";
 
 function serializeContext(value: { execution: OperatorExecution | null; selectedId: string | null; query: string }) {
   return JSON.stringify({ panel: value.execution?.panel || "answer", query: value.query.slice(0, 500), selected_id: value.selectedId, ordered_ids: resultRecords(value.execution).map(recordId).slice(0, 50) });
@@ -28,6 +28,14 @@ export function useOperatorScene(openTarget: (target: string) => void) {
 
   const run = useCallback(async (message: string, evidenceId?: string) => {
     if (message.trim().length < 2) return;
+    if (wantsCloseOperatorView(message)) {
+      controller.current?.abort();
+      setPending(false);
+      setError(null);
+      setExecution(null);
+      setDomain(null);
+      return;
+    }
     controller.current?.abort();
     const request = new AbortController();
     controller.current = request;
@@ -65,7 +73,8 @@ export function useOperatorScene(openTarget: (target: string) => void) {
       setExecution(result);
       setSelectedId(id);
       setDomain(projectionDomain(result.panel));
-      if (wantsFullView(message) && result.target && !result.error) openTarget(result.target);
+      const directNavigation = result.action === "NAVIGATE_WORKSPACE" || (result.action === "CAMERA_OPEN" && /\bopen\s+(?:camera|cam)\b|افتح\s+الكاميرا/i.test(message));
+      if ((wantsFullView(message) || directNavigation) && result.target && !result.error) openTarget(result.target);
     } catch (failure) {
       if (!request.signal.aborted) setError(failure instanceof Error ? failure.message : "The request could not be completed.");
     } finally {

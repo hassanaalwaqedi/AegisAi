@@ -576,13 +576,14 @@ class IntelligenceContextService:
             None,
         )
         active_ingestion_model = self._active_ingestion_model_status()
+        active_runtime: Dict[str, Any] = {}
         if active_ingestion_model is not None:
             # Camera frames take the production path documented at the top of
             # this module: MultiCameraPipelineManager -> FrameIngestionService
             # -> APIState.  The optional Redis worker pipeline can be alive
             # while its private detector remains unused, so it must not make a
             # loaded, actively ingesting detector look unavailable.
-            model_status, model_detail = active_ingestion_model
+            model_status, model_detail, active_runtime = active_ingestion_model
         elif detection_stage is None:
             model_status = Availability.UNAVAILABLE
             model_detail = "Detection stage is not present in the pipeline."
@@ -616,6 +617,10 @@ class IntelligenceContextService:
                 running=running,
                 stages=stages,
                 freshness=self._freshness(observed_at, pipeline_status, pipeline_detail),
+                model=active_runtime.get("model"),
+                inference_device=active_runtime.get("device"),
+                precision=active_runtime.get("precision"),
+                inference_performance=active_runtime.get("performance", {}),
             ),
             checks,
             reasons,
@@ -623,7 +628,7 @@ class IntelligenceContextService:
 
     def _active_ingestion_model_status(
         self,
-    ) -> Optional[Tuple[Availability, Optional[str]]]:
+    ) -> Optional[Tuple[Availability, Optional[str], Dict[str, Any]]]:
         """Return model health only when the active camera ingestion owns one.
 
         This intentionally returns ``None`` when no detector has been created
@@ -637,7 +642,17 @@ class IntelligenceContextService:
             return None
 
         if ingestion is not None and getattr(ingestion, "_detector", None) is not None:
-            return Availability.LIVE, None
+            try:
+                capabilities = ingestion.get_model_capabilities()
+                runtime = capabilities.get("general_detector", {})
+                return Availability.LIVE, None, {
+                    "model": runtime.get("model"),
+                    "device": runtime.get("device"),
+                    "precision": runtime.get("precision"),
+                    "performance": runtime.get("performance", {}),
+                }
+            except Exception:
+                return Availability.LIVE, None, {}
         return None
 
     def _collect_persistence_check(

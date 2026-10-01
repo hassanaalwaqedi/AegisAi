@@ -42,11 +42,16 @@ class RecorderConfig:
     
     # Performance
     max_concurrent_writes: int = 2
+    max_event_seconds: float = 30.0  # Hard bound: a stuck high-risk stream cannot grow RAM forever.
     
     @property
     def buffer_size(self) -> int:
         """Calculate buffer size in frames."""
         return int(self.pre_buffer_seconds * self.target_fps)
+
+    @property
+    def max_recording_frames(self) -> int:
+        return max(self.buffer_size, int((self.pre_buffer_seconds + self.max_event_seconds) * self.target_fps))
 
 
 class RiskRecorder:
@@ -196,6 +201,10 @@ class RiskRecorder:
             # Add frame to recording
             with self._recording_lock:
                 self._recording_frames.append(frame.copy())
+                if len(self._recording_frames) > self._config.max_recording_frames:
+                    # Preserve recent incident context without allowing a
+                    # permanently high score to create an unbounded list.
+                    del self._recording_frames[:len(self._recording_frames) - self._config.max_recording_frames]
                 
                 # Update max risk score
                 if self._current_event:
@@ -394,6 +403,13 @@ class MultiCameraRecorder:
             for recorder in self._recorders.values():
                 recorder.stop()
             self._recorders.clear()
+
+    def stop_camera(self, camera_id: str) -> None:
+        """Release one camera's bounded buffer when its source stops."""
+        with self._lock:
+            recorder = self._recorders.pop(camera_id, None)
+        if recorder is not None:
+            recorder.stop()
     
     def get_all_stats(self) -> Dict[str, Dict[str, Any]]:
         """Get stats for all recorders."""

@@ -32,6 +32,7 @@ class MultiModelDetector:
         weapon_detector: Optional[WeaponDetector] = None,
         threat_detector: Optional[YOLOEThreatDetector] = None,
         debug: Optional[bool] = None,
+        device: Optional[str] = None,
     ):
         if config is not None:
             self._config = config.detection
@@ -40,8 +41,16 @@ class MultiModelDetector:
         else:
             self._config = DetectionConfig()
 
-        self.person_detector = person_detector or YOLODetector(config=config, detection_config=detection_config)
-        self.weapon_detector = weapon_detector or WeaponDetector(config=config, detection_config=detection_config)
+        self.person_detector = person_detector or YOLODetector(
+            config=config,
+            detection_config=detection_config,
+            device=device,
+        )
+        self.weapon_detector = weapon_detector or WeaponDetector(
+            config=config,
+            detection_config=detection_config,
+            device=device,
+        )
         self.threat_detector = threat_detector or YOLOEThreatDetector(config=config, detection_config=detection_config)
         self._debug = self._config.weapon_debug_enabled if debug is None else debug
         self._threat_frame_counter = 0

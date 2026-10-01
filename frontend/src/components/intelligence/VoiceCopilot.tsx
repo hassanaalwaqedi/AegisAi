@@ -20,18 +20,41 @@ export function uniqueCitations(citations: LiveCitation[]) {
 }
 
 export function applySafeUiCommand(command: SafeUICommand) {
+  if (command.kind === "close_operator_view") {
+    window.dispatchEvent(new CustomEvent("aegis:close-operator-view"));
+    return;
+  }
+  if (command.kind === "open_workspace") {
+    const targets: Record<string, string> = { dashboard: "/dashboard", cameras: "/cameras", events: "/events", tracks: "/tracks", evidence: "/semantic", semantic: "/semantic", analytics: "/analytics", intelligence: "/intelligence" };
+    const target = command.targetId ? targets[command.targetId] : undefined;
+    if (target) window.location.assign(target);
+    return;
+  }
   if (command.kind === "focus_health") {
     document.getElementById("intelligence-health-panel")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     return;
   }
-  const route = command.kind === "open_cameras"
-    ? "/cameras"
-    : command.kind === "open_semantic_evidence"
-      ? "/semantic"
-      : command.kind === "show_track_evidence"
-        ? "/tracks"
-        : "/events";
-  window.location.assign(route);
+  if (command.kind === "open_incident") {
+    if (!command.targetId) return;
+    window.location.assign(`/events?incident=${encodeURIComponent(command.targetId)}`);
+    return;
+  }
+  if (command.kind === "open_cameras") {
+    window.location.assign(command.cameraId ? `/cameras?camera=${encodeURIComponent(command.cameraId)}&view=focus` : "/cameras");
+    return;
+  }
+  if (command.kind === "show_track_evidence") {
+    const params = new URLSearchParams();
+    if (command.targetId) params.set("track", command.targetId);
+    if (command.cameraId) params.set("camera", command.cameraId);
+    window.location.assign(params.size ? `/tracks?${params.toString()}` : "/tracks");
+    return;
+  }
+  if (command.kind === "show_risk_evidence") {
+    window.location.assign(command.targetId ? `/events?event=${encodeURIComponent(command.targetId)}` : "/events");
+    return;
+  }
+  window.location.assign("/semantic");
 }
 
 function sessionLabel(state: AegisVoiceSessionState, voiceAvailable: boolean) {

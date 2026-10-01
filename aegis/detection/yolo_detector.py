@@ -13,6 +13,8 @@ Features:
 """
 
 import logging
+import threading
+import time
 from typing import List, Tuple, Optional, NamedTuple
 from pathlib import Path
 
@@ -79,7 +81,8 @@ class YOLODetector:
     def __init__(
         self,
         config: Optional[AegisConfig] = None,
-        detection_config: Optional[DetectionConfig] = None
+        detection_config: Optional[DetectionConfig] = None,
+        device: Optional[str] = None,
     ):
         """
         Initialize the YOLOv8 detector.
@@ -95,20 +98,29 @@ class YOLODetector:
         """
         if config is not None:
             self._config = config.detection
-            self._device = config.get_device_string()
+            self._device = device if device is not None else config.get_device_string()
         elif detection_config is not None:
             self._config = detection_config
-            self._device = ""
+            self._device = device or ""
         else:
             # Use default configuration
             self._config = DetectionConfig()
-            self._device = ""
+            self._device = device or ""
         
         self._model: Optional[YOLO] = None
         self._class_names = dict(self._config.CLASS_NAMES)
         self._available_class_ids: Optional[set[int]] = None
         self._validated_weapon_classes: Optional[set[int]] = None
         self._model_load_error: Optional[str] = None
+        self._runtime_lock = threading.Lock()
+        self._runtime_frame_count = 0
+        self._runtime_reported = False
+        self._runtime_timing_totals = {
+            "preprocessing_ms": 0.0,
+            "inference_ms": 0.0,
+            "postprocessing_ms": 0.0,
+            "end_to_end_ms": 0.0,
+        }
         
         logger.info(
             f"YOLODetector initialized with model={self._config.model_path}, "
@@ -246,10 +258,29 @@ class YOLODetector:
         torch_model = getattr(model, "model", None)
         parameters = getattr(torch_model, "parameters", None)
         try:
-            precision = str(next(parameters()).dtype)
+            parameter_precision = str(next(parameters()).dtype)
         except (StopIteration, TypeError):
-            precision = None
+            parameter_precision = None
+        predictor = getattr(model, "predictor", None)
+        backend = getattr(predictor, "model", None) if predictor is not None else None
+        backend_half = getattr(backend, "fp16", None)
+        precision = (
+            "FP16" if backend_half is True else "FP32" if backend_half is False
+            else parameter_precision
+        )
         yaml = getattr(torch_model, "yaml", {}) or {}
+        with self._runtime_lock:
+            frame_count = self._runtime_frame_count
+            totals = dict(self._runtime_timing_totals)
+        performance = {
+            "measured_frames": frame_count,
+            **{
+                f"avg_{name}": round(value / frame_count, 3) if frame_count else None
+                for name, value in totals.items()
+            },
+            "effective_fps": round(1000.0 * frame_count / totals["end_to_end_ms"], 2)
+            if frame_count and totals["end_to_end_ms"] > 0 else None,
+        }
         metadata.update({
             "resolved_path": str(Path(getattr(model, "ckpt_path", path)).resolve()),
             "model": Path(getattr(model, "ckpt_path", path)).name,
@@ -257,12 +288,26 @@ class YOLODetector:
             "task": getattr(model, "task", None),
             "class_count": len(names),
             "classes": names,
-            "device": str(getattr(model, "device", self._device or "auto")),
+            # ``YOLO.device`` reflects the loaded PyTorch module and can remain
+            # CPU even after Ultralytics has created a CUDA AutoBackend for
+            # prediction. Report the predictor backend that performed work.
+            "device": self._predictor_device(model) or "not_inferred",
+            "requested_device": self._device or "auto",
             "precision": precision,
+            "performance": performance,
             "architecture": yaml.get("yaml_file") or yaml.get("scale"),
             "error": None,
         })
         return metadata
+
+    @staticmethod
+    def _predictor_device(model: YOLO) -> Optional[str]:
+        predictor = getattr(model, "predictor", None)
+        backend = getattr(predictor, "model", None) if predictor is not None else None
+        device = getattr(backend, "device", None)
+        if device is None:
+            return None
+        return str(device)
     
     def detect(
         self,
@@ -302,6 +347,8 @@ class YOLODetector:
         inference_threshold = min(conf_thresh, weapon_threshold) if includes_weapon_classes else conf_thresh
         
         # Run inference with optimizations
+        end_to_end_started = time.perf_counter()
+        prediction_started = time.perf_counter()
         results = model.predict(
             source=frame,
             conf=inference_threshold,
@@ -312,9 +359,11 @@ class YOLODetector:
             half=getattr(self._config, 'half_precision', False),  # FP16 optimization
             verbose=False  # Suppress per-frame logging
         )
+        prediction_wall_ms = (time.perf_counter() - prediction_started) * 1000.0
 
         
         # Parse results into standardized format
+        result_parsing_started = time.perf_counter()
         detections = []
         
         for result in results:
@@ -372,7 +421,49 @@ class YOLODetector:
                 )
                 detections.append(detection)
         
-        logger.debug(f"Detected {len(detections)} objects in frame")
+        end_to_end_ms = (time.perf_counter() - end_to_end_started) * 1000.0
+        stage_speeds = [getattr(result, "speed", {}) or {} for result in results]
+
+        def mean_stage(name: str) -> float:
+            samples = [float(speed[name]) for speed in stage_speeds if speed.get(name) is not None]
+            return sum(samples) / len(samples) if samples else 0.0
+
+        timing = {
+            "preprocessing_ms": mean_stage("preprocess"),
+            "inference_ms": mean_stage("inference"),
+            # Include Ultralytics NMS plus Aegis result conversion/CPU transfer.
+            "postprocessing_ms": mean_stage("postprocess") + (time.perf_counter() - result_parsing_started) * 1000.0,
+            "end_to_end_ms": end_to_end_ms,
+        }
+        with self._runtime_lock:
+            self._runtime_frame_count += 1
+            for name, value in timing.items():
+                self._runtime_timing_totals[name] += value
+            first_measured_frame = not self._runtime_reported
+            self._runtime_reported = True
+        if first_measured_frame:
+            actual_device = self._predictor_device(model) or "not_inferred"
+            try:
+                import torch
+                cuda_available = bool(torch.cuda.is_available())
+                detected_gpu = torch.cuda.get_device_name(0) if cuda_available else "none"
+                cuda_runtime = getattr(torch.version, "cuda", None) or "unavailable"
+            except Exception:
+                cuda_available, detected_gpu, cuda_runtime = False, "none", "unavailable"
+            backend = getattr(getattr(model, "predictor", None), "model", None)
+            precision = "FP16" if getattr(backend, "fp16", False) else "FP32"
+            logger.info(
+                "AI DEVICE REPORT (first active inference)\nPyTorch CUDA available: %s\nDetected GPU: %s\nCUDA runtime: %s\nYOLO requested device: %s\nYOLO actual device: %s\nPrecision: %s\nModel: %s",
+                cuda_available,
+                detected_gpu,
+                cuda_runtime,
+                self._device or "auto",
+                actual_device,
+                precision,
+                self._config.model_path,
+            )
+        logger.debug("YOLO prediction call completed in %.3f ms", prediction_wall_ms)
+        logger.debug("Detected %s objects in frame", len(detections))
         return detections
     
     def detect_batch(

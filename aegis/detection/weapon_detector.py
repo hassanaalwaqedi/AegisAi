@@ -27,16 +27,17 @@ class WeaponDetector:
         self,
         config: Optional[AegisConfig] = None,
         detection_config: Optional[DetectionConfig] = None,
+        device: Optional[str] = None,
     ):
         if config is not None:
             self._config = config.detection
-            self._device = config.get_device_string()
+            self._device = device if device is not None else config.get_device_string()
         elif detection_config is not None:
             self._config = detection_config
-            self._device = ""
+            self._device = device or ""
         else:
             self._config = DetectionConfig()
-            self._device = ""
+            self._device = device or ""
 
         self._model: Optional[YOLO] = None
         self._model_path = self._config.weapon_model_path

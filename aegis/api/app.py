@@ -319,8 +319,17 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
     async def _startup_database_schema():
         try:
             from aegis.database.connection import create_tables
+            from aegis.database.connection import get_db_session
+            from aegis.database.repositories import IncidentVerificationRepository
 
             create_tables()
+            with get_db_session() as session:
+                interrupted = IncidentVerificationRepository(session).fail_interrupted_processing()
+            if interrupted:
+                logger.warning(
+                    "Marked %s verification(s) FAILED after API process restart",
+                    interrupted,
+                )
             logger.info("Database persistence schema is ready")
         except Exception as exc:
             logger.warning("Database schema initialization failed: %s", exc)
@@ -331,6 +340,22 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
             from aegis.pipeline.startup import create_pipeline
             from aegis.settings import get_settings
             settings = get_settings()
+            try:
+                import torch
+                cuda_available = bool(torch.cuda.is_available())
+                detected_gpu = torch.cuda.get_device_name(0) if cuda_available else "none"
+                cuda_runtime = getattr(torch.version, "cuda", None) or "unavailable"
+            except Exception as exc:
+                cuda_available = False
+                detected_gpu = "none"
+                cuda_runtime = f"unavailable ({type(exc).__name__})"
+            requested_device = settings.device.value
+            if requested_device == "cuda" and not cuda_available:
+                logger.warning(
+                    "CUDA was explicitly requested but PyTorch cannot access it; inference will fail visibly rather than silently changing to CPU."
+                )
+            elif requested_device == "auto" and not cuda_available:
+                logger.warning("CUDA is unavailable; Ultralytics auto-selection will use CPU for this runtime.")
             pipeline = create_pipeline(
                 model_path=settings.detection.model_path,
                 confidence=settings.detection.confidence_threshold,
@@ -354,6 +379,16 @@ def create_app(config: Optional[APIConfig] = None) -> FastAPI:
             general = capabilities.get("general_detector", {})
             weapon = capabilities.get("weapon_detector", {}).get("runtime", {})
             threat = capabilities.get("threat_detector", {}).get("runtime", {})
+            logger.info(
+                "AI DEVICE REPORT\nPyTorch CUDA available: %s\nDetected GPU: %s\nCUDA runtime: %s\nYOLO requested device: %s\nYOLO actual device: %s\nPrecision: %s\nModel: %s",
+                cuda_available,
+                detected_gpu,
+                cuda_runtime,
+                requested_device,
+                general.get("device", "not_inferred"),
+                general.get("precision", "unknown"),
+                general.get("model", settings.detection.model_path),
+            )
             logger.info(
                 "AEGIS VISION RUNTIME | general status=%s model=%s configured=%s task=%s classes=%s device=%s | weapon status=%s reason=%s | threat status=%s model=%s prompt_mode=%s classes=%s frame_skip=%s reason=%s",
                 "READY" if general.get("ready") else "DEGRADED",

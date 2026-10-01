@@ -15,7 +15,7 @@ from .models import (
     BehaviorEmbedding, TelemetrySpan, TelemetryMetric, Anomaly,
     SmartAlertRecord, NLQQuery, InsightRecord, ConsentRecord,
     SystemKnowledge, SystemKnowledgeAudit, Incident, OperationalAlert, AuditLog,
-    Observation, RiskAssessment,
+    Observation, RiskAssessment, IncidentVerification,
 )
 
 
@@ -298,6 +298,121 @@ class RiskAssessmentRepository:
         return self.db.query(RiskAssessment).filter(
             RiskAssessment.incident_id == incident_id,
         ).order_by(RiskAssessment.assessed_at.asc(), RiskAssessment.id.asc()).all()
+
+
+class IncidentVerificationRepository:
+    """Persistence boundary for VLM results kept separate from CV evidence."""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create_or_get(self, *, verification_id: str, **kwargs) -> tuple[IncidentVerification, bool]:
+        existing = self.get_by_verification_id(verification_id)
+        if existing is not None:
+            return existing, False
+        record = IncidentVerification(
+            verification_id=str(verification_id),
+            incident_id=str(kwargs["incident_id"]) if kwargs.get("incident_id") else None,
+            event_id=str(kwargs["event_id"]),
+            camera_id=str(kwargs["camera_id"]),
+            provider=str(kwargs.get("provider") or "gemini"),
+            model=kwargs.get("model"),
+            status=str(kwargs["status"]),
+            combined_state=kwargs.get("combined_state"),
+            error=kwargs.get("error"),
+            evidence_metadata=dict(kwargs.get("evidence_metadata") or {}),
+        )
+        self.db.add(record)
+        self.db.flush()
+        return record, True
+
+    def get_by_verification_id(self, verification_id: str) -> Optional[IncidentVerification]:
+        return self.db.query(IncidentVerification).filter(
+            IncidentVerification.verification_id == str(verification_id)
+        ).one_or_none()
+
+    def latest_for_incident(self, incident_id: str) -> Optional[IncidentVerification]:
+        return self.db.query(IncidentVerification).filter(
+            IncidentVerification.incident_id == str(incident_id)
+        ).order_by(desc(IncidentVerification.created_at), desc(IncidentVerification.id)).first()
+
+    def latest_for_event(self, event_id: str) -> Optional[IncidentVerification]:
+        return self.db.query(IncidentVerification).filter(
+            IncidentVerification.event_id == str(event_id)
+        ).order_by(desc(IncidentVerification.created_at), desc(IncidentVerification.id)).first()
+
+    def candidate_metrics(self) -> dict[str, int]:
+        """Aggregate candidate verification outcomes across all API workers."""
+        rows = self.db.query(
+            IncidentVerification.status,
+            IncidentVerification.combined_state,
+            Event.event_metadata,
+        ).join(Event, Event.event_id == IncidentVerification.event_id).all()
+        candidate_rows = [
+            (str(status or "").upper(), str(state or "").upper())
+            for status, state, metadata in rows
+            if isinstance(metadata, dict) and metadata.get("vlm_candidate") is True
+        ]
+        contradicted = sum(state == "CONTRADICTED" for _, state in candidate_rows)
+        return {
+            "vlm_candidates_total": len(candidate_rows),
+            "vlm_candidates_supported": sum(state == "SUPPORTED" for _, state in candidate_rows),
+            "vlm_candidates_contradicted": contradicted,
+            "vlm_candidates_uncertain": sum(state in {"UNCERTAIN", "INSUFFICIENT_EVIDENCE"} for _, state in candidate_rows),
+            "vlm_candidate_failures": sum(status == "FAILED" for status, _ in candidate_rows),
+            "vlm_false_positive_reduction_candidates": contradicted,
+        }
+
+    def list_for_incident(self, incident_id: str) -> List[IncidentVerification]:
+        return self.db.query(IncidentVerification).filter(
+            IncidentVerification.incident_id == str(incident_id)
+        ).order_by(desc(IncidentVerification.created_at), desc(IncidentVerification.id)).all()
+
+    def fail_interrupted_processing(self) -> int:
+        """Close requests left PROCESSING by a previous API process."""
+        count = self.db.query(IncidentVerification).filter(
+            IncidentVerification.status == "PROCESSING"
+        ).update(
+            {
+                IncidentVerification.status: "FAILED",
+                IncidentVerification.combined_state: "FAILED",
+                IncidentVerification.error: "api_process_restarted_during_verification",
+            },
+            synchronize_session=False,
+        )
+        self.db.flush()
+        return int(count or 0)
+
+    def update(self, verification_id: str, *, status: str, verdict: Optional[dict] = None, combined_state: Optional[str] = None, latency_ms: Optional[float] = None, error: Optional[str] = None, evidence_metadata: Optional[dict] = None, incident_id: Optional[str] = None) -> Optional[IncidentVerification]:
+        record = self.get_by_verification_id(verification_id)
+        if record is None:
+            return None
+        record.status = str(status)
+        if incident_id is not None:
+            record.incident_id = str(incident_id)
+        if verdict is not None:
+            record.model = verdict.get("model") or record.model
+            record.verdict = verdict.get("verdict")
+            record.confidence = verdict.get("confidence")
+            record.severity = verdict.get("severity")
+            record.summary = verdict.get("summary")
+            record.subjects = list(verdict.get("subjects") or [])
+            record.observations = list(verdict.get("observations") or [])
+            record.supporting_evidence = list(verdict.get("supporting_evidence") or [])
+            record.contradicting_evidence = list(verdict.get("contradicting_evidence") or [])
+            record.uncertainties = list(verdict.get("uncertainties") or [])
+            record.recommended_action = verdict.get("recommended_action")
+            record.analysis_version = verdict.get("analysis_version") or record.analysis_version
+        if combined_state is not None:
+            record.combined_state = combined_state
+        if latency_ms is not None:
+            record.latency_ms = float(latency_ms)
+        if error is not None:
+            record.error = str(error)[:2000]
+        if evidence_metadata is not None:
+            record.evidence_metadata = dict(evidence_metadata)
+        self.db.flush()
+        return record
 
 
 class IncidentRepository:

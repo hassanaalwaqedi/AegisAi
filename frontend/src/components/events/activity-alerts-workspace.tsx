@@ -45,6 +45,8 @@ type ActivityAlertsWorkspaceProps = {
   isUnavailable: boolean;
   camerasUnavailable: boolean;
   onRetry: () => void;
+  incidentId?: string;
+  eventId?: string;
 };
 
 const filterLabels: Array<{ id: ActivityFilter; label: string }> = [
@@ -55,7 +57,7 @@ const filterLabels: Array<{ id: ActivityFilter; label: string }> = [
   { id: "camera", label: "Camera issues" },
 ];
 
-export function ActivityAlertsWorkspace({ cameras, events, alerts, isLoading, isUnavailable, camerasUnavailable, onRetry }: ActivityAlertsWorkspaceProps) {
+export function ActivityAlertsWorkspace({ cameras, events, alerts, isLoading, isUnavailable, camerasUnavailable, onRetry, incidentId, eventId }: ActivityAlertsWorkspaceProps) {
   const t = useTranslations("events");
   const [filter, setFilter] = useState<ActivityFilter>("all");
   const [search, setSearch] = useState("");
@@ -63,7 +65,12 @@ export function ActivityAlertsWorkspace({ cameras, events, alerts, isLoading, is
   const allItems = useMemo(() => buildActivityAlertItems(cameras, events, alerts), [alerts, cameras, events]);
   const items = useMemo(() => filterActivityAlertItems(allItems, filter, search), [allItems, filter, search]);
   const summary = useMemo(() => activitySummary(allItems), [allItems]);
-  const selected = selectedId === null ? null : items.find((item) => item.id === selectedId) ?? items[0] ?? null;
+  const incidentItem = incidentId ? allItems.find((item) => item.event?.incident_id === incidentId) : undefined;
+  const eventItem = eventId ? allItems.find((item) => item.event?.event_id === eventId || item.relatedEvents.some((event) => event.event_id === eventId)) : undefined;
+  const deepLinkedItem = eventId ? eventItem : incidentId ? incidentItem : undefined;
+  const selected = selectedId === null
+    ? null
+    : items.find((item) => item.id === selectedId) ?? (selectedId === undefined ? (eventId || incidentId ? deepLinkedItem ?? null : items[0] ?? null) : null);
   const hasResolvedSource = allItems.some((item) => item.status === "resolved");
 
   if (isLoading) return <ActivityLoading />;
@@ -79,7 +86,7 @@ export function ActivityAlertsWorkspace({ cameras, events, alerts, isLoading, is
         <>
           <ActivityToolbar filter={filter} search={search} hasResolvedSource={hasResolvedSource} onFilterChange={setFilter} onSearchChange={setSearch} />
           {camerasUnavailable ? <p className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/[0.05] px-3 py-2 text-sm text-amber-100">Camera details are temporarily unavailable. Available activity is still shown.</p> : null}
-          <div className={cn("events-content", selectedId != null && "has-selection")}>
+          <div className={cn("events-content", (selectedId != null || (selectedId === undefined && Boolean(deepLinkedItem))) && "has-selection")}>
             <ReviewQueue items={items} filter={filter} selectedId={selected?.id ?? null} onSelect={setSelectedId} />
             <AlertInvestigationPanel key={selected?.id ?? "empty"} item={selected} onBack={() => setSelectedId(null)} />
           </div>

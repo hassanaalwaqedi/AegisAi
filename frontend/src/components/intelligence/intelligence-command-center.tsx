@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { useRouter } from "next/navigation";
-import { Activity, Bot, Camera, Radio, ShieldAlert, type LucideIcon } from "lucide-react";
+import { Activity, Bot, Camera, Keyboard, Mic, Radio, ShieldAlert, type LucideIcon } from "lucide-react";
 
 import { AegisIntelligenceNetwork, type AegisNetworkNodeId } from "@/components/intelligence/aegis-intelligence-network";
 import { IntelligenceCore } from "@/components/intelligence/intelligence-core";
@@ -18,7 +18,7 @@ import type { IntelligenceContextState } from "@/hooks/useIntelligenceContext";
 import { appConfig } from "@/lib/config";
 import type { Availability } from "@/lib/intelligence-context";
 import type { AegisVoiceSessionState, SafeUICommand, VoiceState } from "@/lib/live-voice";
-const SAFE_TARGET = /^\/(cameras|events|semantic|tracks|analytics)(?:[/?]|$)/;
+const SAFE_TARGET = /^\/(dashboard|cameras|events|semantic|tracks|analytics|intelligence)(?:[/?]|$)/;
 
 function countRisk(state: IntelligenceContextState, levels: string[]) {
   return state.context?.alerts.items.filter((item) => item.level && levels.includes(item.level.toUpperCase())).length ?? 0;
@@ -99,7 +99,7 @@ export function IntelligenceCommandCenter({ state }: { state: IntelligenceContex
   }, [locale, router]);
 
   const scene = useOperatorScene(openTarget);
-  const { execution, pending, error: commandError, domain: activeDomain, run: runCommand } = scene;
+  const { execution, pending, error: commandError, domain: activeDomain, run: runCommand, dismiss: dismissScene } = scene;
   const operatorTarget = networkRequestNode ?? nodeForCommand(activeDomain ?? "") ?? (activeHighRisk > 0 ? "risk" : null);
   const runtime = useOperatorController({
     voiceState,
@@ -129,13 +129,20 @@ export function IntelligenceCommandCenter({ state }: { state: IntelligenceContex
   }, []);
 
   const handleVoiceCommand = useCallback((command: SafeUICommand) => {
-    // Voice tools project their results into the same persistent scene.
     if (projectedVoiceTurn.current) return;
     projectedVoiceTurn.current = true;
+    if (command.kind === "close_operator_view") {
+      dismissScene();
+      return;
+    }
+    if (command.kind === "open_workspace" && command.targetId) {
+      openTarget(`/${command.targetId === "evidence" ? "semantic" : command.targetId}`);
+      return;
+    }
     const message = spokenRequest.current || (command.kind === "open_cameras" ? `Open camera ${command.cameraId || command.targetId || ""}` : command.kind === "show_track_evidence" ? `Show track ${command.targetId || ""}` : command.kind === "open_semantic_evidence" ? "Find recent evidence" : command.kind === "show_risk_evidence" ? "Show high-risk events" : "Show system status");
     setNetworkRequestNode(nodeForCommand(message));
     void runCommand(message);
-  }, [runCommand]);
+  }, [dismissScene, openTarget, runCommand]);
 
   const handleUserTurn = useCallback((message: string) => {
     spokenRequest.current = message;
@@ -203,8 +210,10 @@ export function IntelligenceCommandCenter({ state }: { state: IntelligenceContex
   const monitorUrgent = monitor.kind === "risk" || monitor.kind === "degraded";
 
   return <section className="intelligence-command-center cinematic-intelligence" data-phase={state.phase} data-presence={presence} data-operator-state={runtime.state} data-operator-asset={operatorAssetStatus}>
+    {/* Background effects */}
     <div className="cinematic-space" aria-hidden><i /><i /><i /><i /><i /></div>
 
+    {/* Status strip */}
     <header className="cinematic-status-strip">
       <h1 className="sr-only">{t("title")}</h1>
       <div className="cinematic-vitals">
@@ -216,35 +225,57 @@ export function IntelligenceCommandCenter({ state }: { state: IntelligenceContex
       <p className="px-3 pb-2 text-center text-[11px] text-slate-400" role="note">{t("humanReviewNote")}</p>
     </header>
 
+    {/* Main stage */}
     <div className="cinematic-stage" data-boot-step={bootStep}>
+      {/* Intelligence network (nodes + SVG connections) */}
       <AegisIntelligenceNetwork runtime={runtime} activeDomain={activeDomain} metrics={networkMetrics} statuses={networkStatuses} signals={networkSignals} cameraPreviewUrl={cameraPreviewUrl} bootStep={bootStep} requestedNode={operatorTarget} onCommand={(command, node) => { setNetworkRequestNode(node); void runCommand(command === "Open camera" ? `Open camera ${firstCamera?.cameraId || ""}` : command); }} />
 
+      {/* Central Aegis Core visualization */}
       <div className="cinematic-center">
         <IntelligenceCore runtime={runtime} status={systemStatus} statusLabel={context ? statusText(systemStatus) : t("unavailable")} stateLabel={coreStateLabel} onAnchors={updateProjectionAnchors} onAssetStatus={setOperatorAssetStatus} />
       </div>
 
+      {/* Foreground energy elements */}
       <div className="aegis-foreground-core" data-state={runtime.state} aria-hidden>
         <i className="aegis-foreground-core-ring" /><i className="aegis-foreground-core-ring" /><i className="aegis-foreground-core-sphere" />
         <span>{Array.from({ length: 10 }, (_, coreParticle) => <i key={coreParticle} style={{ "--core-particle": coreParticle } as React.CSSProperties} />)}</span>
       </div>
 
-      <ProjectionLayer execution={execution} pending={pending} domain={activeDomain} anchorName={runtime.projectionAnchor} anchor={projectionAnchors[runtime.projectionAnchor]} selectedId={scene.selectedId} onSelect={scene.select} onDismiss={scene.dismiss} onOpen={openTarget} onFindSimilar={(id) => void runCommand(t("findSimilarCommand"), id)} onRelated={() => void runCommand("Show related evidence")} />
+      {/* Projection layer for results */}
+      <ProjectionLayer execution={execution} pending={pending} domain={activeDomain} anchorName={runtime.projectionAnchor} anchor={projectionAnchors[runtime.projectionAnchor]} selectedId={scene.selectedId} onSelect={scene.select} onDismiss={dismissScene} onOpen={openTarget} onFindSimilar={(id) => void runCommand(t("findSimilarCommand"), id)} onRelated={() => void runCommand("Show related evidence")} />
 
-      <div className="cinematic-command-deck">
+      {/* Interaction dock */}
+      <div className="aegis-interaction-dock">
+        {/* Monitor notice */}
         <div className="operator-monitor-notice" data-state={monitor.kind} role={monitorUrgent ? "alert" : "status"} aria-live={monitorUrgent ? "assertive" : "polite"}>
           <Radio aria-hidden />
           <span>{t("monitor.title")}</span>
           <strong>{monitorLabel}</strong>
         </div>
+
+        {/* Voice copilot */}
         <VoiceCopilot contextAvailability={context?.ai.voice.handsFree ?? "unavailable"} contextReason={context?.ai.voice.reason} onActivity={handleVoiceActivity} onUiCommand={handleVoiceCommand} onUserTurn={handleUserTurn} sceneContext={scene.sceneContext} onCitation={(citation) => { const id = citation.evidenceId.replace(/^[^:]+:/, ""); void runCommand(citation.kind === "camera" ? `Open camera ${citation.cameraId || id}` : citation.kind === "track" ? `Show track ${id}` : "Show related evidence", id); }} onProjection={(result) => { projectedVoiceTurn.current = true; scene.present(result, spokenRequest.current); }} onToolActivity={(activity) => setToolPending(activity.status === "calling")} />
-        <div className="cinematic-state-line" data-visible={showOperatorContext}><span data-presence={presence} /><strong>{coreStateLabel}</strong>{runtime.target ? <><i /><small>{runtime.target}</small></> : null}</div>
-        <p className="operator-ambient-cue" data-visible={showOperatorContext} aria-live="polite">{runtime.state === "LISTENING" ? "Listening" : runtime.state === "THINKING" ? "Understanding request" : runtime.state === "EXECUTING" ? `Working with ${runtime.target ?? "Aegis"}` : runtime.state === "SPEAKING" ? "Responding" : runtime.state === "WARNING" || runtime.state === "ERROR" ? "Attention required" : coreStateLabel}</p>
-        <button type="button" className="operator-text-mode-toggle" aria-expanded={textModeOpen} aria-controls="operator-text-mode" onClick={() => setTextModeOpen((open) => !open)}>{textModeOpen ? "Close text input" : "Use text instead"}</button>
-        {textModeOpen ? <form id="operator-text-mode" className="operator-text-mode" onSubmit={(event) => { event.preventDefault(); submitTextCommand(); }}>
+
+        {/* State line */}
+        <div className="cinematic-state-line" data-visible={showOperatorContext}>
+          <span data-presence={presence} />
+          <strong>{coreStateLabel}</strong>
+          {runtime.target ? <><i /><small>{runtime.target}</small></> : null}
+        </div>
+
+        {/* Text input toggle */}
+        <button type="button" className="aegis-dock-text-toggle" aria-expanded={textModeOpen} aria-controls="operator-text-mode" onClick={() => setTextModeOpen((open) => !open)}>
+          <Keyboard aria-hidden />
+          <span>{textModeOpen ? "Close" : "Type your request..."}</span>
+        </button>
+
+        {/* Text input form */}
+        {textModeOpen ? <form id="operator-text-mode" className="aegis-dock-text-form" onSubmit={(event) => { event.preventDefault(); submitTextCommand(); }}>
           <label className="sr-only" htmlFor="operator-text-command">Type a command for Aegis</label>
-          <input id="operator-text-command" aria-label="Type a command for Aegis" value={textCommand} onChange={(event) => setTextCommand(event.target.value)} placeholder="Type a short command" disabled={pending} autoComplete="off" />
-          <button type="submit" disabled={pending || textCommand.trim().length < 2}>{pending ? "Working" : "Execute"}</button>
+          <input id="operator-text-command" aria-label="Type a command for Aegis" value={textCommand} onChange={(event) => setTextCommand(event.target.value)} placeholder="Type a short command..." disabled={pending} autoComplete="off" />
+          <button type="submit" disabled={pending || textCommand.trim().length < 2}>{pending ? "Working..." : "Send"}</button>
         </form> : null}
+
         {commandError ? <p className="operator-command-error" role="alert">{commandError}</p> : null}
       </div>
     </div>

@@ -231,6 +231,72 @@ class RiskAssessment(Base):
         }
 
 
+class IncidentVerification(Base):
+    """Secondary VLM assessment; it never overwrites the CV incident record."""
+
+    __tablename__ = "incident_verifications"
+    __table_args__ = (
+        Index("ix_incident_verifications_incident_created", "incident_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    verification_id = Column(String(160), nullable=False, unique=True, index=True)
+    # Candidate verification can precede incident promotion. Every record is
+    # tied to a real persisted event; incident_id is set only if normal
+    # correlation policy later promotes that event.
+    incident_id = Column(String(128), nullable=True, index=True)
+    event_id = Column(String(128), nullable=False, index=True)
+    camera_id = Column(String(80), nullable=False, index=True)
+    provider = Column(String(64), nullable=False, default="gemini")
+    model = Column(String(200))
+    status = Column(String(20), nullable=False, index=True)
+    combined_state = Column(String(32))
+    verdict = Column(String(64))
+    confidence = Column(Float)
+    severity = Column(String(20))
+    summary = Column(Text)
+    subjects = Column(JSONValue, nullable=False, default=list)
+    observations = Column(JSONValue, nullable=False, default=list)
+    supporting_evidence = Column(JSONValue, nullable=False, default=list)
+    contradicting_evidence = Column(JSONValue, nullable=False, default=list)
+    uncertainties = Column(JSONValue, nullable=False, default=list)
+    recommended_action = Column(String(32))
+    evidence_metadata = Column(JSONValue, nullable=False, default=dict)
+    error = Column(Text)
+    latency_ms = Column(Float)
+    analysis_version = Column(String(64), nullable=False, default="vlm-incident-v1")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now, onupdate=_utc_now)
+
+    def to_dict(self) -> dict:
+        return {
+            "verification_id": self.verification_id,
+            "incident_id": self.incident_id,
+            "event_id": self.event_id,
+            "camera_id": self.camera_id,
+            "provider": self.provider,
+            "model": self.model,
+            "status": self.status,
+            "combined_state": self.combined_state,
+            "verdict": self.verdict,
+            "confidence": self.confidence,
+            "severity": self.severity,
+            "summary": self.summary,
+            "subjects": list(self.subjects or []),
+            "observations": list(self.observations or []),
+            "supporting_evidence": list(self.supporting_evidence or []),
+            "contradicting_evidence": list(self.contradicting_evidence or []),
+            "uncertainties": list(self.uncertainties or []),
+            "recommended_action": self.recommended_action,
+            "evidence_metadata": dict(self.evidence_metadata or {}),
+            "error": self.error,
+            "latency_ms": self.latency_ms,
+            "analysis_version": self.analysis_version,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class Incident(Base):
     """A durable, evidence-backed sequence of correlated risk events.
 

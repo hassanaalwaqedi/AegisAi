@@ -33,6 +33,27 @@ describe("persistent operator scene", () => {
     expect(navigate).toHaveBeenCalledWith("/events?risk=high&event=one");
   });
 
+  it("executes allow-listed workspace navigation returned by Aegis", async () => {
+    execute.mockResolvedValue({ ...events, action: "NAVIGATE_WORKSPACE", panel: "navigation", target: "/analytics", result: { workspace: "analytics" } });
+    const navigate = vi.fn();
+    const { result } = renderHook(() => useOperatorScene(navigate));
+
+    await act(async () => { await result.current.run("Open analytics"); });
+
+    expect(navigate).toHaveBeenCalledWith("/analytics");
+  });
+
+  it("closes the current operator view locally without asking the backend", async () => {
+    execute.mockResolvedValue(events);
+    const { result } = renderHook(() => useOperatorScene(vi.fn()));
+    await act(async () => { await result.current.run("Show events"); });
+
+    await act(async () => { await result.current.run("Close this view"); });
+
+    expect(result.current.execution).toBeNull();
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects out-of-range selections without inventing a result", async () => {
     execute.mockResolvedValue(events);
     const { result } = renderHook(() => useOperatorScene(vi.fn()));

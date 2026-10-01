@@ -506,6 +506,8 @@
       "timeUnavailable": "الوقت غير متاح",
       "unclassified": "غير مصنّف",
       "findSimilar": "العثور على أدلة مشابهة",
+      "candidateReasonTitle": "سبب ترشيح Aegis لهذا الحدث",
+      "verificationStatus": "حالة التحقق",
       "event": "حدث مسجل",
       "track": "كائن متتبّع",
       "riskScore": "درجة الخطر",

@@ -13,12 +13,13 @@ Usage:
 from __future__ import annotations
 
 import os
+import json
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -406,6 +407,58 @@ class GeminiLiveSettings(BaseSettings):
     model_config = {"env_prefix": "GEMINI_LIVE_"}
 
 
+class VLMSettings(BaseSettings):
+    """Opt-in, asynchronous Gemini visual risk verification.
+
+    This is deliberately separate from ``GeminiLiveSettings``: Live handles
+    operator audio while this sidecar uploads only gated incident evidence.
+    """
+
+    enabled: bool = Field(False, validation_alias="VLM_ENABLED")
+    verify_incidents: bool = Field(True, validation_alias="VLM_VERIFY_INCIDENTS")
+    verify_candidates: bool = Field(True, validation_alias="VLM_VERIFY_CANDIDATES")
+    camera_allowlist: str = Field(
+        "",
+        validation_alias=AliasChoices("VLM_ALLOWED_CAMERA_IDS", "VLM_CAMERA_ALLOWLIST"),
+    )
+    min_risk_score: float = Field(0.70, ge=0.0, le=1.0, validation_alias="VLM_MIN_RISK_SCORE")
+    min_severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] = Field("MEDIUM", validation_alias="VLM_MIN_SEVERITY")
+    candidate_min_risk_score: float = Field(0.35, ge=0.0, le=1.0, validation_alias="VLM_CANDIDATE_MIN_RISK_SCORE")
+    candidate_min_severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] = Field("MEDIUM", validation_alias="VLM_CANDIDATE_MIN_SEVERITY")
+    max_concurrent_requests: int = Field(2, ge=1, le=8, validation_alias="VLM_MAX_CONCURRENT_REQUESTS")
+    timeout_seconds: int = Field(30, ge=3, le=120, validation_alias="VLM_TIMEOUT_SECONDS")
+    pre_event_seconds: float = Field(5.0, ge=1.0, le=15.0, validation_alias="VLM_PRE_EVENT_SECONDS")
+    post_event_seconds: float = Field(5.0, ge=0.0, le=15.0, validation_alias="VLM_POST_EVENT_SECONDS")
+    buffer_frames: int = Field(50, ge=8, le=120, validation_alias="VLM_BUFFER_FRAMES")
+    max_keyframes: int = Field(6, ge=4, le=8, validation_alias="VLM_MAX_KEYFRAMES")
+    jpeg_quality: int = Field(80, ge=50, le=95, validation_alias="VLM_JPEG_QUALITY")
+    max_video_bytes: int = Field(15_000_000, ge=1_000_000, le=100_000_000, validation_alias="VLM_MAX_VIDEO_BYTES")
+    model: Optional[str] = Field(None, validation_alias="VLM_MODEL")
+
+    model_config = {"env_prefix": "VLM_", "env_file": ".env", "extra": "ignore", "populate_by_name": True}
+
+    @property
+    def allowed_camera_ids(self) -> Tuple[str, ...]:
+        """Parse the explicit JSON-list setting, preserving legacy CSV support."""
+        raw = str(self.camera_allowlist or "").strip()
+        if not raw:
+            return ()
+        if raw.startswith("["):
+            try:
+                decoded = json.loads(raw)
+            except (TypeError, ValueError):
+                return ()
+            if not isinstance(decoded, list):
+                return ()
+            return tuple(dict.fromkeys(str(item).strip() for item in decoded if str(item).strip()))
+        return tuple(dict.fromkeys(item.strip() for item in raw.split(",") if item.strip()))
+
+    def allows_camera(self, camera_id: str) -> bool:
+        """Fail closed: only explicitly listed camera/source IDs are authorised."""
+        camera = str(camera_id or "").strip()
+        return bool(camera and camera in self.allowed_camera_ids)
+
+
 class RedisSettings(BaseSettings):
     """Redis Configuration for event bus and pipeline messaging."""
 
@@ -476,6 +529,7 @@ class AegisSettings(BaseSettings):
     proximity_risk: ProximityRiskSettings = Field(default_factory=ProximityRiskSettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
     gemini_live: GeminiLiveSettings = Field(default_factory=GeminiLiveSettings)
+    vlm: VLMSettings = Field(default_factory=VLMSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
 
     model_config = {"env_prefix": "AEGIS_", "env_file": ".env", "extra": "ignore"}

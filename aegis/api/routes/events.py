@@ -154,6 +154,23 @@ async def get_persisted_evidence(
     return {"count": len(evidence), "evidence": evidence}
 
 
+@router.get("/verification/metrics")
+async def get_vlm_verification_metrics():
+    """Expose persisted global candidate counts and process-local latency data."""
+    from aegis.intelligence.vlm_verifier import get_vlm_verifier
+
+    metrics = get_vlm_verifier().metrics()
+    try:
+        from aegis.database.connection import get_db_session
+        from aegis.database.repositories import IncidentVerificationRepository
+        with get_db_session() as session:
+            metrics.update(IncidentVerificationRepository(session).candidate_metrics())
+    except Exception as exc:
+        logger.warning("Persisted VLM candidate metrics unavailable: %s", type(exc).__name__)
+        return {"metrics": metrics, "scope": "process_local", "persisted_metrics_available": False}
+    return {"metrics": metrics, "scope": "database_global", "persisted_metrics_available": True}
+
+
 @router.get("/incidents")
 async def get_active_incidents(
     limit: int = Query(default=20, ge=1, le=100, description="Max active incidents to return"),
@@ -299,6 +316,66 @@ async def get_incident_assessments(incident_id: str, x_aegis_actor: Optional[str
         details={"assessment_count": len(assessments)},
     )
     return {"incident": _incident_payload(incident), "count": len(assessments), "assessments": assessments}
+
+
+@router.get("/incidents/{incident_id}/verification")
+async def get_incident_verification(incident_id: str, x_aegis_actor: Optional[str] = Header(default=None)):
+    """Return the latest independent Gemini VLM assessment, if one exists."""
+    incident = _load_incident(incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found.")
+    try:
+        from aegis.database.connection import get_db_session
+        from aegis.database.repositories import IncidentVerificationRepository
+        with get_db_session() as session:
+            verification = IncidentVerificationRepository(session).latest_for_incident(incident_id)
+            payload = verification.to_dict() if verification else None
+    except Exception as exc:
+        logger.warning("Incident verification lookup failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Visual verification is temporarily unavailable.") from exc
+    _audit("incident.verification_accessed", actor=x_aegis_actor, resource_type="incident", resource_id=incident_id, details={"available": payload is not None})
+    return {"incident": _incident_payload(incident), "verification": payload}
+
+
+@router.get("/evidence/{event_id}/verification")
+async def get_event_verification(event_id: str, x_aegis_actor: Optional[str] = Header(default=None)):
+    """Return the CV event and its optional event-level VLM verification."""
+    event = _load_evidence(event_id=event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Persisted event not found.")
+    try:
+        from aegis.database.connection import get_db_session
+        from aegis.database.repositories import IncidentVerificationRepository
+        with get_db_session() as session:
+            verification = IncidentVerificationRepository(session).latest_for_event(event_id)
+            payload = verification.to_dict() if verification else None
+    except Exception as exc:
+        logger.warning("Event verification lookup failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Visual verification is temporarily unavailable.") from exc
+    _audit(
+        "event.verification_accessed",
+        actor=x_aegis_actor,
+        resource_type="event",
+        resource_id=event_id,
+        details={"available": payload is not None},
+    )
+    return {"event": _evidence_payload(event), "verification": payload}
+
+
+@router.post("/incidents/{incident_id}/verification")
+async def request_incident_verification(incident_id: str, x_aegis_actor: Optional[str] = Header(default=None)):
+    """Authorised, asynchronous re-analysis using already stored snapshots."""
+    try:
+        from aegis.intelligence.vlm_verifier import build_persisted_incident_package, get_vlm_verifier
+        package = build_persisted_incident_package(incident_id)
+        verification_id = get_vlm_verifier().schedule(package)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Incident verification request failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Visual verification could not be scheduled.") from exc
+    _audit("incident.verification_requested", actor=x_aegis_actor, resource_type="incident", resource_id=incident_id, details={"verification_id": verification_id})
+    return {"incident_id": incident_id, "verification_id": verification_id, "status": "scheduled"}
 
 
 @router.get("/incidents/{incident_id}")

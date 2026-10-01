@@ -42,7 +42,7 @@ export type AegisVoiceCoreState = z.infer<typeof aegisVoiceCoreStateSchema>;
 
 const citationSchema = z.object({
   evidenceId: z.string().min(1),
-  kind: z.enum(["camera", "event", "alert", "track", "detection", "recording", "statistics", "health"]),
+  kind: z.enum(["camera", "event", "incident", "alert", "track", "detection", "recording", "statistics", "health"]),
   label: z.string().min(1),
   cameraId: z.string().min(1).optional().nullable(),
   observedAt: z.string().min(1).optional().nullable(),
@@ -53,7 +53,10 @@ export type LiveCitation = z.infer<typeof citationSchema>;
 
 export const safeUiCommandSchema = z.object({
   kind: z.enum([
+    "open_workspace",
+    "close_operator_view",
     "open_cameras",
+    "open_incident",
     "show_track_evidence",
     "open_semantic_evidence",
     "show_risk_evidence",

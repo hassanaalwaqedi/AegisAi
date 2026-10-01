@@ -35,6 +35,10 @@ export function wantsFullView(message: string) {
   return /\b(full (?:view|details|camera|evidence|timeline|page)|open (?:the )?page|deep investigation)\b|عرض كامل|التفاصيل الكاملة/i.test(message);
 }
 
+export function wantsCloseOperatorView(message: string) {
+  return /^\s*(?:close|dismiss|hide)(?:\s+(?:this|the|current))?(?:\s+(?:result|panel|view|window|workspace))?\s*$|^\s*(?:أغلق|اغلق|اخفِ|اخفي)(?:\s+(?:النتيجة|العرض|النافذة|اللوحة))?\s*$/i.test(message);
+}
+
 export function selectedOrdinal(message: string): number | null {
   if (!/\b(open|show|select|expand)\b|افتح|اعرض/i.test(message)) return null;
   const match = message.match(/\b(first|second|third|fourth|fifth|\d+(?:st|nd|rd|th)?)\s+(?:one|result|event|item)\b|\b(?:result|item|event)\s*#?\s*(\d+)\b/i);

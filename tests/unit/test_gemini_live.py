@@ -383,6 +383,37 @@ def test_tool_allowlist_and_citation_validation_reject_unsafe_actions():
     assert opened.ui_command.kind == UICommandKind.OPEN_CAMERAS
 
 
+def test_live_agent_exposes_only_bounded_internal_controls(monkeypatch):
+    from aegis.intelligence.agent_control import CameraControlResult
+    from aegis.intelligence import live_tools
+
+    registry = LiveToolRegistry(
+        session_id="session-control",
+        operator_id="operator",
+        correlation_id="correlation-control",
+        context_getter=context_with_cameras,
+    )
+    monkeypatch.setattr(live_tools, "control_camera_runtime", lambda **_: CameraControlResult(
+        action="stop",
+        requested_scope="one",
+        cameras=({"camera_id": "gate-2", "runtime": {"status": "stopped"}},),
+        failures=(),
+    ))
+
+    navigation = registry.execute("navigate_workspace", {"workspace": "analytics"})
+    closed = registry.execute("close_operator_view")
+    controlled = registry.execute("control_camera_runtime", {"action": "stop", "scope": "one", "camera_id": "gate-2"})
+
+    assert navigation.ui_command.kind == UICommandKind.OPEN_WORKSPACE
+    assert navigation.ui_command.target_id == "analytics"
+    assert closed.ui_command.kind == UICommandKind.CLOSE_OPERATOR_VIEW
+    assert controlled.data["succeeded"] == 1
+    assert controlled.ui_command.camera_id == "gate-2"
+    declarations = {item["name"] for item in registry.declarations()}
+    assert {"navigate_workspace", "close_operator_view", "control_camera_runtime"} <= declarations
+    assert "delete_camera" not in declarations
+
+
 def test_audit_records_have_no_audio_payload_and_are_correlated():
     manager = LiveSessionManager(settings_getter=live_settings, sdk_available=lambda: True)
     registry = LiveToolRegistry(

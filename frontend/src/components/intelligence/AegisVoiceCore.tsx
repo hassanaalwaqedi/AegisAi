@@ -62,7 +62,10 @@ function coreStateFor(
 
 function commandLabel(command: SafeUICommand) {
   const labels: Record<SafeUICommand["kind"], string> = {
+    open_workspace: "Open workspace",
+    close_operator_view: "Close operator view",
     open_cameras: "Open cameras",
+    open_incident: "Open incident",
     show_track_evidence: "Open tracking evidence",
     open_semantic_evidence: "Open semantic evidence",
     show_risk_evidence: "Open risk evidence",

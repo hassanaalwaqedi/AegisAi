@@ -71,8 +71,11 @@ def public_evidence(event):
     result = {key: record.get(key) for key in (
         "event_id", "alert_id", "incident_id", "camera_id", "camera_name", "event_type",
         "timestamp", "object_class", "risk_level", "risk_score", "track_id", "zone", "zone_name", "reason",
+        "verification_status", "vlm_candidate",
     )}
     metadata = event.event_metadata or {}
+    result["factors"] = [str(value) for value in record.get("factors", []) if isinstance(value, str)] if isinstance(record.get("factors"), list) else []
+    result["reason_codes"] = [str(value) for value in record.get("reason_codes", []) if isinstance(value, str)] if isinstance(record.get("reason_codes"), list) else []
     confidence = metadata.get("confidence")
     result["detection_confidence"] = float(confidence) if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and math.isfinite(confidence) and 0 <= confidence <= 1 else None
     result["detectors"] = [str(x) for x in metadata.get("model_source", []) if isinstance(x, str)] if isinstance(metadata.get("model_source"), list) else []

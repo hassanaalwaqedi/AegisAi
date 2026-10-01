@@ -51,7 +51,9 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - AEGIS_API_KEY=${AEGIS_API_KEY:?AEGIS_API_KEY must be set}
       - AEGIS_DEBUG=${AEGIS_DEBUG:-false}
+      - AEGIS_DEVICE=${AEGIS_DEVICE:-auto}
       - AEGIS_DETECTION_MODEL_PATH=${AEGIS_DETECTION_MODEL_PATH:-/app/models/yolo11n.pt}
+      - AEGIS_DETECTION_HALF_PRECISION=${AEGIS_DETECTION_HALF_PRECISION:-false}
       - AEGIS_WEAPON_MODEL_PATH=${AEGIS_WEAPON_MODEL_PATH:-/app/models/weapon_detector.pt}
       - AEGIS_WEAPON_DETECTOR_ENABLED=${AEGIS_WEAPON_DETECTOR_ENABLED:-false}
       - AEGIS_THREAT_DETECTOR_ENABLED=${AEGIS_THREAT_DETECTOR_ENABLED:-true}
@@ -77,6 +79,23 @@ services:
       - AEGIS_CAMERA_PREVIEW_JPEG_QUALITY=${AEGIS_CAMERA_PREVIEW_JPEG_QUALITY:-75}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.6-flash}
+      - VLM_ENABLED=${VLM_ENABLED:-false}
+      - VLM_VERIFY_INCIDENTS=${VLM_VERIFY_INCIDENTS:-true}
+      - VLM_VERIFY_CANDIDATES=${VLM_VERIFY_CANDIDATES:-true}
+      - VLM_ALLOWED_CAMERA_IDS=${VLM_ALLOWED_CAMERA_IDS:-${VLM_CAMERA_ALLOWLIST:-[]}}
+      - VLM_CAMERA_ALLOWLIST=${VLM_CAMERA_ALLOWLIST:-}
+      - VLM_MIN_RISK_SCORE=${VLM_MIN_RISK_SCORE:-0.70}
+      - VLM_MIN_SEVERITY=${VLM_MIN_SEVERITY:-MEDIUM}
+      - VLM_CANDIDATE_MIN_RISK_SCORE=${VLM_CANDIDATE_MIN_RISK_SCORE:-0.35}
+      - VLM_CANDIDATE_MIN_SEVERITY=${VLM_CANDIDATE_MIN_SEVERITY:-MEDIUM}
+      - VLM_MAX_CONCURRENT_REQUESTS=${VLM_MAX_CONCURRENT_REQUESTS:-2}
+      - VLM_TIMEOUT_SECONDS=${VLM_TIMEOUT_SECONDS:-30}
+      - VLM_PRE_EVENT_SECONDS=${VLM_PRE_EVENT_SECONDS:-5}
+      - VLM_POST_EVENT_SECONDS=${VLM_POST_EVENT_SECONDS:-5}
+      - VLM_BUFFER_FRAMES=${VLM_BUFFER_FRAMES:-50}
+      - VLM_MAX_KEYFRAMES=${VLM_MAX_KEYFRAMES:-6}
+      - VLM_JPEG_QUALITY=${VLM_JPEG_QUALITY:-80}
+      - VLM_MODEL=${VLM_MODEL:-}
       - GEMINI_LIVE_ENABLED=${GEMINI_LIVE_ENABLED:-false}
       - GEMINI_LIVE_MODEL=${GEMINI_LIVE_MODEL:-gemini-3.8-live}
       - GEMINI_LIVE_VOICE=${GEMINI_LIVE_VOICE:-Kore}
@@ -96,6 +115,13 @@ services:
         condition: service_healthy
     volumes:
       - ./data:/app/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: unless-stopped
 
   # Next.js dashboard. It owns the authenticated /api/backend proxy, so the
